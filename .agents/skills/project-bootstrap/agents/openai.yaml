@@ -1,0 +1,4 @@
+interface:
+  display_name: "Project Bootstrap"
+  short_description: "Seed projects with tailored agent workflows"
+  default_prompt: "Use $project-bootstrap to seed a project for my tech stack and requirements."

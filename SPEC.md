@@ -22,6 +22,8 @@ requirements.
 - Make installation previewable, recoverable, and safe to repeat.
 - Provide focused workflows for recurring development, technical-art,
   publishing, and infrastructure work.
+- Seed new or existing projects with additive project-local instructions,
+  planning documents, and stack-specific skills.
 - Keep repository and installer behavior verifiable locally and in CI.
 
 ## Users and environments
@@ -68,6 +70,9 @@ requirements and instructions.
   Codex-native Graphify and live Unreal Editor workflows.
 - **REQ-WORKFLOW-03:** Skills that depend on external applications or services
   must document those dependencies instead of silently installing them.
+- **REQ-WORKFLOW-04:** Provide non-destructive Bash and PowerShell project setup
+  scripts plus a conversational workflow that selects required skills and
+  creates focused project-local skill coverage when none exists.
 
 ### Validation and governance
 
@@ -89,6 +94,7 @@ requirements and instructions.
 | `.agents/skills/` | Reusable workflows installed into `AGENTS_HOME` |
 | `scripts/install.sh` | User-scoped Bash installer for Linux and macOS |
 | `scripts/install.ps1` | User-scoped PowerShell installer for Windows |
+| `scripts/setup-project.*` | Additive project document and skill seeding |
 | `codex-plugins.txt` | Plugin selectors used only by explicit plugin installation |
 | `scripts/validate.sh` | Repository and platform-appropriate local validation |
 | `scripts/test-install.*` | Isolated installer integration tests |
@@ -127,6 +133,8 @@ plugin state, and runtime databases remain outside repository ownership.
 - Replacing project-specific `AGENTS.md` files or product requirements.
 - Installing Codex, Claude Code, CodeRabbit, RTK, local model servers,
   Graphify, or the Unreal MCP server.
+- Installing project dependencies or initializing version control as part of
+  project seeding.
 - Adding security scanners that do not support the repository's languages.
 
 ## Acceptance criteria
@@ -148,6 +156,9 @@ plugin state, and runtime databases remain outside repository ownership.
 - **AC-08:** Hosted repository settings match `REQ-GOVERN-01` and
   `REQ-GOVERN-02`, with any unavailable independent-approval requirement
   documented.
+- **AC-09:** Project setup tests on Unix and Windows verify new targets,
+  additive merges, existing-file preservation, dry-run safety, selected-skill
+  copying, missing-skill errors, and idempotence.
 
 ## Open questions
 

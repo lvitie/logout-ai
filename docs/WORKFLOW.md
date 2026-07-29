@@ -15,35 +15,38 @@
 
 1. Install this repository's global instructions, configuration, rules, and
    reusable skills.
-2. Inspect the real repository, branch, worktree, architecture, runtime paths,
+2. Seed a new or existing project with `scripts/setup-project.sh`,
+   `scripts/setup-project.ps1`, or `$project-bootstrap`. Preserve existing
+   files and install only skills required by the chosen stack and workflow.
+3. Inspect the real repository, branch, worktree, architecture, runtime paths,
    and existing validation.
-3. Put durable project conventions and boundaries in `AGENTS.md`.
-4. Define observable requirements, non-goals, and acceptance criteria in
+4. Put durable project conventions and boundaries in `AGENTS.md`.
+5. Define observable requirements, non-goals, and acceptance criteria in
    `SPEC.md`.
-5. Order outcomes, risks, exit criteria, and validation in `ROADMAP.md`.
-6. Break the current phase into reviewable work in `TASKS.md`.
-7. Use `$ai-project-manager` to produce a requirement-linked plan with automated
+6. Order outcomes, risks, exit criteria, and validation in `ROADMAP.md`.
+7. Break the current phase into reviewable work in `TASKS.md`.
+8. Use `$ai-project-manager` to produce a requirement-linked plan with automated
    and manual validation.
-8. Stop for plan approval when the user reserved that checkpoint.
-9. Implement one approved phase, run focused checks, and inspect the diff.
-10. Run the complete local gate and update task status only after it passes.
-11. Use `$pr-readiness` to run local CodeRabbit review:
+9. Stop for plan approval when the user reserved that checkpoint.
+10. Implement one approved phase, run focused checks, and inspect the diff.
+11. Run the complete local gate and update task status only after it passes.
+12. Use `$pr-readiness` to run local CodeRabbit review:
 
     ```bash
     coderabbit review --agent --uncommitted --include-untracked
     ```
 
-12. Fix actionable findings, rerun validation, and repeat local review until
+13. Fix actionable findings, rerun validation, and repeat local review until
     clean or every remaining item has a documented reason.
-13. Commit the focused change, push it, and open a draft pull request only when
+14. Commit the focused change, push it, and open a draft pull request only when
     authorized.
-14. Require CI validation, applicable security checks, CodeRabbit review, and a
+15. Require CI validation, applicable security checks, CodeRabbit review, and a
     fresh independent review on the latest commit.
-15. Fix or explain every review item, resolve completed threads, and repeat the
+16. Fix or explain every review item, resolve completed threads, and repeat the
     checks after every push.
-16. Complete and document required manual testing on the real target
+17. Complete and document required manual testing on the real target
     environment.
-17. Merge only after the final diff, planning documents, CI, security checks,
+18. Merge only after the final diff, planning documents, CI, security checks,
     reviews, threads, and manual tests are clean.
 
 ## Security baseline

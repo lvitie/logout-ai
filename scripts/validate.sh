@@ -30,8 +30,12 @@ required_files=(
   ".github/workflows/validate.yml"
   "scripts/install.ps1"
   "scripts/install.sh"
+  "scripts/setup-project.ps1"
+  "scripts/setup-project.sh"
   "scripts/test-install.ps1"
   "scripts/test-install.sh"
+  "scripts/test-setup-project.ps1"
+  "scripts/test-setup-project.sh"
 )
 
 for relative in "${required_files[@]}"; do
@@ -112,7 +116,9 @@ fi
 
 if ! bash -n \
   "$repo_root/scripts/install.sh" \
+  "$repo_root/scripts/setup-project.sh" \
   "$repo_root/scripts/test-install.sh" \
+  "$repo_root/scripts/test-setup-project.sh" \
   "$repo_root/scripts/validate.sh"; then
   fail "Bash syntax validation failed"
 fi
@@ -120,7 +126,9 @@ fi
 if command -v shellcheck >/dev/null 2>&1; then
   shellcheck \
     "$repo_root/scripts/install.sh" \
+    "$repo_root/scripts/setup-project.sh" \
     "$repo_root/scripts/test-install.sh" \
+    "$repo_root/scripts/test-setup-project.sh" \
     "$repo_root/scripts/validate.sh" ||
     fail "ShellCheck failed"
 fi
@@ -141,7 +149,9 @@ fi
 if command -v pwsh >/dev/null 2>&1; then
   for powershell_file in \
     "$repo_root/scripts/install.ps1" \
-    "$repo_root/scripts/test-install.ps1"; do
+    "$repo_root/scripts/setup-project.ps1" \
+    "$repo_root/scripts/test-install.ps1" \
+    "$repo_root/scripts/test-setup-project.ps1"; do
     # The PowerShell variables must not expand in Bash.
     # shellcheck disable=SC2016
     LOGOUT_AI_POWERSHELL_FILE="$powershell_file" pwsh -NoProfile -Command \
@@ -152,6 +162,10 @@ fi
 
 if ! bash "$repo_root/scripts/test-install.sh"; then
   fail "installer integration test failed"
+fi
+
+if ! bash "$repo_root/scripts/test-setup-project.sh"; then
+  fail "project setup integration test failed"
 fi
 
 if [[ $errors -gt 0 ]]; then

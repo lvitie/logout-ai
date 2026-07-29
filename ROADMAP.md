@@ -152,7 +152,52 @@ carrying inherited paths or branding.
 - **Manual:** Review the skill inventory for overlap, missing host coverage,
   and undocumented external-tool assumptions.
 
-## Phase 4: Enforced repository governance
+## Phase 4: Project bootstrapping
+
+**Status:** In progress
+
+### Outcome
+
+New and existing repositories can receive the project planning baseline and
+only the reusable skills their stack needs without overwriting existing work.
+
+### Specification coverage
+
+`REQ-WORKFLOW-04` and `AC-09`.
+
+### Included work
+
+- Add additive Bash and PowerShell project setup scripts.
+- Seed project instruction and planning templates plus the core workflow
+  skills.
+- Add a conversational skill-selection workflow that creates missing focused
+  skill coverage.
+- Test new targets, existing targets, idempotence, dry runs, and error paths.
+
+### Dependencies and risks
+
+- Bash and PowerShell must preserve equivalent merge semantics.
+- Existing project files remain authoritative even when they differ from the
+  current templates.
+- Generated skills must remain focused and must not absorb project-specific
+  requirements.
+
+### Exit criteria
+
+- Both setup scripts create missing targets and merge into existing targets.
+- Existing files are never replaced.
+- Required stack skills can be selected explicitly.
+- The project-bootstrap workflow gathers requirements and handles missing
+  skill coverage.
+
+### Validation
+
+- **Automated:** Run `./scripts/validate.sh`, the Bash setup integration test,
+  and the PowerShell setup integration test in Windows CI.
+- **Manual:** Review a seeded project with existing instructions and a stack
+  requiring multiple skills.
+
+## Phase 5: Enforced repository governance
 
 **Status:** Planned
 

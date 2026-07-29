@@ -1,18 +1,14 @@
 # Logout AI tasks
 
-## Current phase: Luca's portable baseline
+## Current phase: Project bootstrapping
 
-- [x] Replace upstream names, paths, and backup prefixes with Logout AI
-  equivalents.
-- [x] Discover trusted Git worktrees beneath `~/Projects` on every platform.
-- [x] Remove upstream machine-specific trust entries from portable config.
-- [x] Add Codex-native Graphify and Unreal MCP skills.
-- [x] Add focused Unreal C++, Unreal materials, Qt C++, and Qt Python skills.
-- [x] Add host-specific Python skills for Maya, Houdini, Blender, 3ds Max,
-  Substance Painter, and Substance Designer.
-- [x] Add Rust and Go web-server skills plus an HTMX frontend skill.
-- [x] Run repository, shell, installer, configuration, and skill validation.
-- [x] Inspect the final diff for only personal-baseline changes.
+- [x] Add additive Bash and PowerShell project setup scripts.
+- [x] Preserve existing project documents and partial skill contents.
+- [x] Support dry runs and explicit stack-skill selection.
+- [x] Add the project-bootstrap requirements and skill-selection workflow.
+- [x] Run repository, Bash, configuration, and skill validation.
+- [ ] Run the PowerShell setup integration test on Windows.
+- [x] Inspect the final diff for only project-bootstrapping changes.
 
 ## Next phase: Enforced repository governance
 

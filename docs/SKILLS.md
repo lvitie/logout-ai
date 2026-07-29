@@ -65,6 +65,7 @@ clear `name` and `description`.
 - `mdbook`
 - `podman-operator`
 - `pr-readiness`
+- `project-bootstrap`
 - `python-ai`
 - `qt-cpp`
 - `qt-python`

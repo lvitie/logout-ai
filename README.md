@@ -115,6 +115,109 @@ for commands whose large or repetitive output benefits from filtering, so no
 separate `rtk init` step is required after running this repository's installer.
 Short commands and commands that require exact output remain raw.
 
+## Bootstrap a project
+
+There are two ways to seed a new or existing project:
+
+- Use the setup script when you already know which skills to copy.
+- Use `$project-bootstrap` when you want Codex to gather requirements, choose
+  the skills, and tailor the new project documents.
+
+Both workflows are additive. They create missing directories and files but do
+not overwrite anything already present, including files inside a partially
+populated skill directory.
+
+### Direct setup scripts
+
+From a Logout AI clone, preview and then seed a project on Linux or macOS:
+
+```bash
+./scripts/setup-project.sh --dry-run /path/to/ProjectName
+./scripts/setup-project.sh /path/to/ProjectName
+```
+
+On Windows:
+
+```powershell
+.\scripts\setup-project.ps1 -TargetPath C:\path\to\ProjectName -DryRun
+.\scripts\setup-project.ps1 -TargetPath C:\path\to\ProjectName
+```
+
+The default setup adds:
+
+- `AGENTS.md`
+- `SPEC.md`
+- `ROADMAP.md`
+- `TASKS.md`
+- `.agents/skills/ai-project-manager/`
+- `.agents/skills/project-bootstrap/`
+
+Select additional skills explicitly when the stack is already known:
+
+```bash
+./scripts/setup-project.sh --dry-run \
+  --skill rust-web --skill htmx /path/to/ProjectName
+./scripts/setup-project.sh \
+  --skill rust-web --skill htmx /path/to/ProjectName
+```
+
+```powershell
+.\scripts\setup-project.ps1 `
+  -TargetPath C:\path\to\ProjectName `
+  -DryRun `
+  -Skill rust-web,htmx
+.\scripts\setup-project.ps1 `
+  -TargetPath C:\path\to\ProjectName `
+  -Skill rust-web,htmx
+```
+
+The scripts copy the generic planning templates as-is. Use the skill when those
+documents should be filled in from the project's actual requirements.
+
+### Guided setup with `$project-bootstrap`
+
+Install this repository first so the skill is available globally, or start
+Codex from the Logout AI clone. Then invoke it with whatever context is already
+known:
+
+```text
+$project-bootstrap create /path/to/ProjectName. It is a Rust Axum service with
+PostgreSQL, HTMX, container deployment, and GitHub pull requests.
+```
+
+For an undecided stack, let the skill drive the requirements pass:
+
+```text
+$project-bootstrap help me seed /path/to/ProjectName and ask me for the stack,
+requirements, constraints, and validation commands you need.
+```
+
+The skill collects any missing:
+
+- project goal, users, and required behavior
+- languages, frameworks, runtimes, tools, and deployment targets
+- constraints, non-goals, security, and privacy boundaries
+- setup, format, lint, type-check, test, build, run, and manual-test commands
+
+It then:
+
+1. Inspects the target and treats existing files as authoritative.
+2. Inventories the available skills and selects only those matching actual
+   requirements.
+3. Previews the additive setup and reports which files will be preserved.
+4. Runs the platform setup script with the selected skills.
+5. Adapts only newly created project documents to the gathered requirements.
+6. Validates the resulting instructions, skills, links, and documented project
+   commands.
+
+When no existing skill covers a required technology or workflow, the skill
+creates a focused project-local skill under `.agents/skills/`. Project-specific
+knowledge stays in `AGENTS.md`, `SPEC.md`, `ROADMAP.md`, or `TASKS.md` instead
+of being turned into a reusable skill.
+
+Project bootstrap does not install dependencies, initialize Git, deploy, or
+perform destructive changes unless those actions are requested explicitly.
+
 ## Use
 
 Start Codex normally to use the default configuration:
@@ -127,6 +230,7 @@ Invoke a skill explicitly when needed:
 
 ```text
 $linux-sysadmin diagnose this service failure
+$project-bootstrap seed /path/to/project for its stack and requirements
 $python-ai add an Ollama-backed model provider
 $rust-cli add a new subcommand
 $rust-web add a traced Axum endpoint with graceful shutdown
@@ -163,6 +267,8 @@ The reusable workflow separates planning from pull-request readiness:
 - `$ai-project-manager` reads or creates `AGENTS.md`, `SPEC.md`, `ROADMAP.md`,
   and `TASKS.md`, pauses at plan-approval boundaries, and executes one
   reviewable phase at a time.
+- `$project-bootstrap` seeds those files additively, selects stack-specific
+  skills, and authors missing project-local skill coverage when necessary.
 - `$pr-readiness` validates the final diff, runs local CodeRabbit review,
   records manual testing, and verifies CI and review state before merge.
 
@@ -220,7 +326,7 @@ dependency review for pull requests.
 - `codex-plugins.txt`: opt-in Codex plugin selections
 - `codex-home/`: portable global instructions, configuration, profiles, and rules
 - `docs/`: reference documentation loaded only when explicitly requested
-- `scripts/`: installation and validation
+- `scripts/`: installation, project setup, integration tests, and validation
 
 See [docs/CODEX_LAYOUT.md](docs/CODEX_LAYOUT.md) for detailed discovery and
 configuration behavior.
