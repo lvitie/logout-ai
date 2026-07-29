@@ -52,7 +52,6 @@ prefix_rule(pattern=["yarn"], decision="allow")
 prefix_rule(pattern=["bunx"], decision="allow")
 
 prefix_rule(pattern=["astro"], decision="allow")
-prefix_rule(pattern=["hugo"], decision="allow")
 prefix_rule(pattern=["vite"], decision="allow")
 prefix_rule(pattern=["next"], decision="allow")
 prefix_rule(pattern=["nuxt"], decision="allow")

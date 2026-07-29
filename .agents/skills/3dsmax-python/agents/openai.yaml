@@ -1,0 +1,4 @@
+interface:
+  display_name: "3ds Max Python"
+  short_description: "Build 3ds Max tools with Python and pymxs"
+  default_prompt: "Use $3dsmax-python to implement and validate this 3ds Max Python tool."

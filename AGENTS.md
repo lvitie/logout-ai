@@ -2,7 +2,7 @@
 
 ## Scope
 
-This repository is the source of truth for Titus's portable Codex
+This repository is the source of truth for Luca's portable Codex
 configuration, reusable skills, and durable coding-agent instructions. The root
 `AGENTS.md` is the project maintenance file and follows the AGENTS.md convention
 for tools that load it automatically.

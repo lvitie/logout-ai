@@ -1,0 +1,4 @@
+interface:
+  display_name: "Substance Designer Python"
+  short_description: "Build Designer Python plugins and graph tools"
+  default_prompt: "Use $substance-designer-python to implement and validate this Designer Python workflow."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "HTMX Frontend"
+  short_description: "Build server-driven HTMX interfaces"
+  default_prompt: "Use $htmx to build a progressive server-rendered web interface."

@@ -1,0 +1,11 @@
+interface:
+  display_name: "Unreal MCP Workflow"
+  short_description: "Safely operate Unreal through Epic MCP"
+  default_prompt: "Use $unreal-mcp-workflow to inspect and safely modify the running Unreal Editor."
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "unreal-mcp"
+      description: "Epic Unreal MCP server running in the local editor"
+      transport: "streamable_http"
+      url: "http://127.0.0.1:8000/mcp"

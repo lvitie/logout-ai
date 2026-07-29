@@ -1,4 +1,11 @@
-# Titus AI specification
+# Logout AI specification
+
+## Purpose
+
+Logout AI is the source of truth for Luca's portable Codex configuration,
+reusable skills, and durable coding-agent instructions. It provides a safe,
+repeatable baseline without treating private Codex runtime state as portable
+configuration.
 
 ## Problem
 
@@ -7,45 +14,92 @@ caches, and other machine-local state. Coding agents also need consistent
 instructions and reusable workflows without replacing project-specific
 requirements.
 
-## Users
+## Goals
 
-The primary user is a developer who works across Linux, macOS, and Windows and
-wants the same safe Codex baseline in multiple repositories.
+- Install the same reviewed Codex baseline on Linux, macOS, and Windows.
+- Keep portable configuration separate from credentials and machine-local
+  runtime state.
+- Make installation previewable, recoverable, and safe to repeat.
+- Provide focused workflows for recurring development, technical-art,
+  publishing, and infrastructure work.
+- Keep repository and installer behavior verifiable locally and in CI.
 
-## Required behavior
+## Users and environments
 
-- Install global Codex instructions, configuration, rules, local-model
-  profiles, and reusable skills from this repository.
-- Optionally install an explicit list of recommended Codex plugins from
-  configured marketplaces.
-- Trust the current user's `~/github` directory and every Git worktree
-  discovered recursively beneath it on each installation.
-- Preview installation without changing the target system.
-- Preserve existing managed targets in timestamped backups before replacement.
-- Leave credentials, sessions, history, caches, plugin state, and runtime
-  databases untouched unless plugin installation is explicitly requested.
-- Support repeated installation without replacing already-correct links.
-- Provide project-planning templates and separate planning from pull-request
-  readiness.
-- Validate repository structure, configuration syntax, skill metadata,
-  documentation consistency, and installer behavior.
-- Run Linux, macOS, and Windows validation for pull requests and default-branch
-  pushes.
+The primary user is Luca, a technical artist and developer who works primarily
+on Linux. The baseline supports work across Unreal Engine, DCC Python
+automation, Qt, Python AI, Rust, Go, HTMX, publishing, Graphify, and self-hosted
+infrastructure.
 
-## Architecture
+macOS and Windows are supported installation targets for the same portable
+baseline. Project-specific repositories remain responsible for their own
+requirements and instructions.
 
-- `codex-home/` contains portable files installed into `CODEX_HOME`.
-- The installer renders `config.toml` with machine-specific exact trust entries
-  while linking the other managed files.
-- `.agents/skills/` contains reusable workflows linked into `AGENTS_HOME`.
-- `scripts/install.sh` and `scripts/install.ps1` perform user-scoped
-  installation.
-- `codex-plugins.txt` records plugin selectors installed only through the
-  explicit plugin option.
-- `scripts/validate.sh` and installer integration tests provide local and CI
-  evidence.
-- `AGENTS.md`, this specification, `ROADMAP.md`, and `TASKS.md` define how the
-  repository is maintained.
+## Requirements
+
+### Portable installation
+
+- **REQ-INSTALL-01:** Install global Codex instructions, configuration, rules,
+  local-model profiles, and reusable skills from this repository.
+- **REQ-INSTALL-02:** Trust the current user's `~/Projects` directory and each
+  Git worktree discovered recursively beneath it.
+- **REQ-INSTALL-03:** Support a dry run that reports intended actions without
+  changing the target system.
+- **REQ-INSTALL-04:** Preserve replaced managed targets in timestamped backups.
+- **REQ-INSTALL-05:** Support repeated installation without replacing
+  already-correct links.
+- **REQ-INSTALL-06:** Leave credentials, sessions, history, caches, plugin
+  state, and runtime databases untouched except for plugin installation
+  explicitly requested under `REQ-PLUGIN-01`.
+
+### Optional plugin installation
+
+- **REQ-PLUGIN-01:** Install only the explicit plugin selectors recorded in
+  `codex-plugins.txt`, and only when the user opts in.
+- **REQ-PLUGIN-02:** A plugin dry run must not invoke Codex or mutate plugin
+  state.
+
+### Reusable workflows
+
+- **REQ-WORKFLOW-01:** Provide project-planning templates and keep planning
+  separate from pull-request readiness.
+- **REQ-WORKFLOW-02:** Provide focused skills for the recurring domains listed
+  under [Users and environments](#users-and-environments), including
+  Codex-native Graphify and live Unreal Editor workflows.
+- **REQ-WORKFLOW-03:** Skills that depend on external applications or services
+  must document those dependencies instead of silently installing them.
+
+### Validation and governance
+
+- **REQ-VALIDATE-01:** Validate repository structure, configuration syntax,
+  skill metadata, documentation consistency, and installer behavior.
+- **REQ-VALIDATE-02:** Run Linux, macOS, and Windows validation for pull
+  requests and default-branch pushes.
+- **REQ-GOVERN-01:** Protect the default branch with pull requests, required
+  validation, and conversation resolution once the hosted repository exposes
+  the final check names.
+- **REQ-GOVERN-02:** Enable applicable repository security controls and give CI
+  workflows only the permissions they require.
+
+## Architecture and ownership
+
+| Path | Responsibility |
+| --- | --- |
+| `codex-home/` | Portable files installed into `CODEX_HOME` |
+| `.agents/skills/` | Reusable workflows installed into `AGENTS_HOME` |
+| `scripts/install.sh` | User-scoped Bash installer for Linux and macOS |
+| `scripts/install.ps1` | User-scoped PowerShell installer for Windows |
+| `codex-plugins.txt` | Plugin selectors used only by explicit plugin installation |
+| `scripts/validate.sh` | Repository and platform-appropriate local validation |
+| `scripts/test-install.*` | Isolated installer integration tests |
+| `AGENTS.md` | Durable repository maintenance instructions |
+| `SPEC.md` | Requirements, boundaries, and acceptance criteria |
+| `ROADMAP.md` | Ordered outcomes, risks, and phase exit criteria |
+| `TASKS.md` | Current reviewable work and validated completion status |
+
+The installers render `config.toml` with machine-specific exact trust entries
+and link the other managed files. Credentials, sessions, history, caches,
+plugin state, and runtime databases remain outside repository ownership.
 
 ## Security and privacy
 
@@ -59,36 +113,43 @@ wants the same safe Codex baseline in multiple repositories.
 ## Compatibility
 
 - The shell installer targets Bash on Linux and macOS.
-- The PowerShell installer targets supported Windows PowerShell environments
-  capable of creating symbolic links.
-- Optional tools may add validation but must not make ordinary installation
-  depend on unrelated developer tooling.
+- The PowerShell installer targets supported Windows environments capable of
+  creating symbolic links.
+- Optional validation tools must not become installation dependencies unless
+  the installer explicitly manages them.
 
 ## Non-goals
 
 - Mirroring the complete Codex home directory.
-- Managing credentials, plugin caches or authentication, sessions, or caches.
-- Installing plugins without an explicit opt-in.
-- Replacing project-specific `AGENTS.md` or requirements.
-- Installing Codex, Claude Code, CodeRabbit, RTK, or local model servers.
+- Managing credentials, authentication, sessions, history, caches, logs, or
+  runtime databases.
+- Installing plugins without explicit opt-in.
+- Replacing project-specific `AGENTS.md` files or product requirements.
+- Installing Codex, Claude Code, CodeRabbit, RTK, local model servers,
+  Graphify, or the Unreal MCP server.
 - Adding security scanners that do not support the repository's languages.
 
 ## Acceptance criteria
 
-- `./scripts/validate.sh` passes from a clean checkout.
-- Linux and macOS installer integration tests verify dry-run safety, backup
-  preservation, correct links, generated GitHub trust entries, and idempotence
-  in isolated temporary directories.
-- Windows CI verifies the equivalent PowerShell installer behavior.
-- Installer tests verify plugin opt-in and dry-run behavior without contacting
-  a live marketplace.
-- Every skill has valid front matter and the documented skill inventory matches
-  the actual directories.
-- Pull requests run validation and dependency review on the latest commit.
-- Workflow documentation covers planning, implementation, review, manual
-  testing, and merge gates.
+- **AC-01:** `./scripts/validate.sh` passes from a clean checkout.
+- **AC-02:** Linux and macOS installer integration tests verify dry-run safety,
+  timestamped backups, correct links, exact generated trust entries, and
+  idempotence in isolated temporary directories.
+- **AC-03:** Windows CI verifies the equivalent PowerShell installer behavior.
+- **AC-04:** Installer tests verify plugin opt-in and dry-run behavior without
+  contacting a live marketplace.
+- **AC-05:** Validation rejects tracked private runtime state, malformed
+  portable configuration, invalid skill front matter, and a skill inventory
+  that differs from the actual directories.
+- **AC-06:** Pull requests and default-branch pushes run the platform validation
+  matrix; pull requests also run dependency review.
+- **AC-07:** Workflow documentation covers planning, implementation, review,
+  manual testing, and merge gates.
+- **AC-08:** Hosted repository settings match `REQ-GOVERN-01` and
+  `REQ-GOVERN-02`, with any unavailable independent-approval requirement
+  documented.
 
-## Unresolved questions
+## Open questions
 
-- Whether future installers should offer optional user-wide Claude Code
-  instructions in addition to the repository-local `CLAUDE.md` routing.
+- **OPEN-01:** Should a future installer optionally manage user-wide Claude
+  Code instructions in addition to repository-local `CLAUDE.md` routing?

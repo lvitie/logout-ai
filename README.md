@@ -1,4 +1,4 @@
-# titus-ai
+# logout-ai
 
 Portable Codex configuration, rules, and reusable skills.
 
@@ -27,10 +27,10 @@ The installer manages:
 - `codex-home/` configuration and rules in `~/.codex/`
 - `.agents/skills/` into `~/.agents/skills/`
 
-### Trust GitHub projects
+### Trust projects
 
 Every installation renders `~/.codex/config.toml` with trusted-project entries
-for that user's `~/github` directory and every Git worktree found recursively
+for that user's `~/Projects` directory and every Git worktree found recursively
 beneath it. This includes repositories inside organization or grouping
 subdirectories.
 
@@ -129,9 +129,32 @@ Invoke a skill explicitly when needed:
 $linux-sysadmin diagnose this service failure
 $python-ai add an Ollama-backed model provider
 $rust-cli add a new subcommand
+$rust-web add a traced Axum endpoint with graceful shutdown
+$go-web add a tested net/http service
+$htmx turn this form into a progressively enhanced fragment update
+$graphify query how configuration reaches the installer
+$maya-python make this exporter namespace-safe
+$3dsmax-python migrate this MAXScript tool to pymxs
+$qt-python make this PySide panel reload-safe
+$unreal-cpp add an editor-only plugin module
+$unreal-materials profile this Custom HLSL material
+$unreal-mcp-workflow inspect the active Unreal level
 ```
 
 Codex can also select skills automatically based on their descriptions.
+
+The Graphify skill expects the separately installed `graphify` CLI. Install it
+with `uv tool install graphifyy`; the repository installer intentionally does
+not install external developer tools. The Unreal workflow similarly expects
+Epic's Unreal MCP server to be configured and running in the editor.
+
+Technical-art workflows are split by host: Maya, Houdini, Blender, 3ds Max,
+Substance Painter, and Substance Designer each have a dedicated Python skill.
+Shared PySide/PyQt behavior lives in `$qt-python`; native Qt 6 development lives
+in `$qt-cpp`.
+
+Web workflows are split into Rust and Go server skills plus a backend-neutral
+HTMX skill for server-rendered interaction design.
 
 ## AI development workflow
 

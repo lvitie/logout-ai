@@ -51,18 +51,30 @@ clear `name` and `description`.
 
 ## Repository skills
 
+- `3dsmax-python`
 - `ai-project-manager`
 - `bash-scripting`
-- `forgejo-maintainer`
+- `blender-python`
+- `go-web`
+- `graphify`
 - `homelab-admin`
-- `hugo`
+- `houdini-python`
+- `htmx`
 - `linux-sysadmin`
+- `maya-python`
 - `mdbook`
 - `podman-operator`
 - `pr-readiness`
 - `python-ai`
-- `quickshell`
+- `qt-cpp`
+- `qt-python`
 - `rust-cli`
+- `rust-web`
+- `substance-designer-python`
+- `substance-painter-python`
+- `unreal-cpp`
+- `unreal-materials`
+- `unreal-mcp-workflow`
 
 Run `./scripts/validate.sh` after adding or changing a skill. Validation fails
 when this list and the skill directories drift apart.

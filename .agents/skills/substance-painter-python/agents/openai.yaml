@@ -1,0 +1,4 @@
+interface:
+  display_name: "Substance Painter Python"
+  short_description: "Build Painter Python plugins and automation"
+  default_prompt: "Use $substance-painter-python to implement and validate this Painter Python plugin."

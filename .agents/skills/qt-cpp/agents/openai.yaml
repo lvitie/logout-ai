@@ -1,0 +1,4 @@
+interface:
+  display_name: "Qt C++"
+  short_description: "Build modern Qt 6 applications with C++"
+  default_prompt: "Use $qt-cpp to implement and test this Qt 6 C++ change."

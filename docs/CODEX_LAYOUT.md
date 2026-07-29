@@ -43,16 +43,16 @@ This repository manages only:
 The installer links instructions, rules, profiles, and skills into their
 documented locations while preserving runtime state. It renders
 `~/.codex/config.toml` as a regular file so it can add machine-specific trust
-entries for `~/github` and every Git worktree discovered beneath it. With the
+entries for `~/Projects` and every Git worktree discovered beneath it. With the
 explicit plugin option, it asks Codex to install each selector from
 `codex-plugins.txt`; it does not link or track the resulting plugin cache,
 authentication, or connector state.
 
-## GitHub project trust
+## Project trust
 
 Codex project trust uses exact absolute project paths. A parent project entry
 and wildcard entries do not automatically trust nested repositories. On each
-run, the installer adds the current user's `~/github` path plus every Git
+run, the installer adds the current user's `~/Projects` path plus every Git
 worktree found recursively below it to the generated config. Rerun the
 installer after adding repositories to refresh those entries.
 

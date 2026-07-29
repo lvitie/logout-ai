@@ -1,0 +1,4 @@
+interface:
+  display_name: "Go Web Servers"
+  short_description: "Build production Go HTTP services"
+  default_prompt: "Use $go-web to build and validate a production Go web server."

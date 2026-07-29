@@ -5,11 +5,11 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $repoRoot = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..'))
-$taskTestRoot = Join-Path ([System.IO.Path]::GetTempPath()) "titus-ai-install-test-$([guid]::NewGuid())"
+$taskTestRoot = Join-Path ([System.IO.Path]::GetTempPath()) "logout-ai-install-test-$([guid]::NewGuid())"
 $testCodexHome = Join-Path $taskTestRoot 'codex home'
 $testAgentsHome = Join-Path $taskTestRoot 'agents home'
 $testUserHome = Join-Path $taskTestRoot 'user home'
-$testGitHubRepo = Join-Path (Join-Path (Join-Path $testUserHome 'github') 'nested') 'project'
+$testProjectsRepo = Join-Path (Join-Path (Join-Path $testUserHome 'Projects') 'nested') 'project'
 $previousCodexHome = [Environment]::GetEnvironmentVariable('CODEX_HOME', 'Process')
 $previousAgentsHome = [Environment]::GetEnvironmentVariable('AGENTS_HOME', 'Process')
 $previousPluginTestLog = [Environment]::GetEnvironmentVariable('CODEX_PLUGIN_TEST_LOG', 'Process')
@@ -53,7 +53,7 @@ function Assert-Link {
 
 try {
     New-Item -ItemType Directory -Path $testCodexHome -Force | Out-Null
-    New-Item -ItemType Directory -Path (Join-Path $testGitHubRepo '.git') -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $testProjectsRepo '.git') -Force | Out-Null
     Set-Content -LiteralPath (Join-Path $testCodexHome 'AGENTS.md') -Value 'original global instructions'
 
     $env:USERPROFILE = $testUserHome
@@ -66,13 +66,13 @@ try {
     $installedConfig = Get-Item -LiteralPath $installedConfigPath -Force
     Assert-Condition ($installedConfig.LinkType -ne 'SymbolicLink') "Expected generated config file: $installedConfigPath"
     $installedConfigContent = [System.IO.File]::ReadAllText($installedConfigPath)
-    $escapedGitHubRoot = (Join-Path $testUserHome 'github').Replace('\', '\\')
-    $escapedGitHubRepo = $testGitHubRepo.Replace('\', '\\')
+    $escapedProjectsRoot = (Join-Path $testUserHome 'Projects').Replace('\', '\\')
+    $escapedProjectsRepo = $testProjectsRepo.Replace('\', '\\')
     Assert-Condition (
-        $installedConfigContent.Contains("[projects.`"$escapedGitHubRoot`"]")
-    ) 'Generated config does not trust the user GitHub root'
+        $installedConfigContent.Contains("[projects.`"$escapedProjectsRoot`"]")
+    ) 'Generated config does not trust the user Projects root'
     Assert-Condition (
-        $installedConfigContent.Contains("[projects.`"$escapedGitHubRepo`"]")
+        $installedConfigContent.Contains("[projects.`"$escapedProjectsRepo`"]")
     ) 'Generated config does not trust a nested Git repository'
     Assert-Link (Join-Path $testCodexHome 'rules') (Join-Path $repoRoot 'codex-home/rules')
     Assert-Link (Join-Path $testCodexHome 'ollama.config.toml') (Join-Path $repoRoot 'codex-home/ollama.config.toml')
@@ -166,7 +166,7 @@ finally {
     $normalizedTestRoot = [System.IO.Path]::GetFullPath($taskTestRoot)
     if (
         $normalizedTestRoot.StartsWith($tempRoot, [StringComparison]::OrdinalIgnoreCase) -and
-        (Split-Path -Leaf $normalizedTestRoot).StartsWith('titus-ai-install-test-')
+        (Split-Path -Leaf $normalizedTestRoot).StartsWith('logout-ai-install-test-')
     ) {
         Remove-Item -LiteralPath $normalizedTestRoot -Recurse -Force -ErrorAction SilentlyContinue
     }

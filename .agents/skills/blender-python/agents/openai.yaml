@@ -1,0 +1,4 @@
+interface:
+  display_name: "Blender Python"
+  short_description: "Build Blender add-ons and automation tools"
+  default_prompt: "Use $blender-python to implement and validate this Blender Python change."

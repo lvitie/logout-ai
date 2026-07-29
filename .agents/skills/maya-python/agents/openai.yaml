@@ -1,0 +1,4 @@
+interface:
+  display_name: "Maya Python"
+  short_description: "Build reliable Maya Python pipeline tools"
+  default_prompt: "Use $maya-python to implement and validate this Maya Python tool."

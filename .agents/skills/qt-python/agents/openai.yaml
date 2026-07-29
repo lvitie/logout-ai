@@ -1,0 +1,4 @@
+interface:
+  display_name: "Qt for Python"
+  short_description: "Build PySide and PyQt desktop and DCC tools"
+  default_prompt: "Use $qt-python to build and validate this PySide or PyQt interface."

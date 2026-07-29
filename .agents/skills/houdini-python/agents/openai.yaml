@@ -1,0 +1,4 @@
+interface:
+  display_name: "Houdini Python"
+  short_description: "Build Houdini HOM tools and automation"
+  default_prompt: "Use $houdini-python to implement and validate this Houdini Python workflow."

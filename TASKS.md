@@ -1,18 +1,18 @@
-# Titus AI tasks
+# Logout AI tasks
 
-## Current phase: Workflow alignment
+## Current phase: Luca's portable baseline
 
-- [x] Add project planning documents and reusable planning templates.
-- [x] Add a focused pull-request readiness skill.
-- [x] Add isolated Linux, macOS, and Windows installer integration tests.
-- [x] Add pull-request CI, dependency review, Dependabot, and a PR template.
-- [x] Align Claude routing and workflow documentation.
-- [x] Add opt-in, cross-platform installation for selected Codex plugins.
-- [x] Trust all Git worktrees beneath the current user's `~/github` directory.
-- [x] Run local repository, shell, installer, workflow, and skill validation.
-- [x] Confirm Windows installer integration, including plugin installation and
-  recursive GitHub trust generation, passes in CI.
-- [x] Inspect the final diff and stage only workflow-alignment changes.
+- [x] Replace upstream names, paths, and backup prefixes with Logout AI
+  equivalents.
+- [x] Discover trusted Git worktrees beneath `~/Projects` on every platform.
+- [x] Remove upstream machine-specific trust entries from portable config.
+- [x] Add Codex-native Graphify and Unreal MCP skills.
+- [x] Add focused Unreal C++, Unreal materials, Qt C++, and Qt Python skills.
+- [x] Add host-specific Python skills for Maya, Houdini, Blender, 3ds Max,
+  Substance Painter, and Substance Designer.
+- [x] Add Rust and Go web-server skills plus an HTMX frontend skill.
+- [x] Run repository, shell, installer, configuration, and skill validation.
+- [x] Inspect the final diff for only personal-baseline changes.
 
 ## Next phase: Enforced repository governance
 

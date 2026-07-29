@@ -1,0 +1,4 @@
+interface:
+  display_name: "Rust Web Servers"
+  short_description: "Build reliable async Rust web services"
+  default_prompt: "Use $rust-web to build and validate a production Rust web server."

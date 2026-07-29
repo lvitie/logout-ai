@@ -1,0 +1,4 @@
+interface:
+  display_name: "Graphify"
+  short_description: "Build and query persistent knowledge graphs"
+  default_prompt: "Use $graphify to query the existing project graph and verify the answer against source files."

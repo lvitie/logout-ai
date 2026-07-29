@@ -1,0 +1,4 @@
+interface:
+  display_name: "Unreal Materials and Shaders"
+  short_description: "Build Unreal materials and HLSL shaders"
+  default_prompt: "Use $unreal-materials to implement and profile this Unreal material or shader change."
