@@ -53,6 +53,11 @@
   cleanup, p4 edits on writable files and Codex writers (network, tracked edits),
   Windows usage probe, queue deps and held/slow alerts, punctuation-tolerant
   verdicts, run-lock patience, and review page sanitizing.
+- [x] Refill the queue: when it runs low the Producer proposes tasks from the plan
+  (`team refill`), which the user promotes or rejects. Run the Codex coordinator
+  unsandboxed so `team` works under default Codex configs (WSL report).
+- [x] Offer `team-setup` on the coordinator's first message until
+  `[project] team_setup` records that it ran.
 
 ## Next phase: Enforced repository governance
 

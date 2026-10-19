@@ -18,8 +18,17 @@ skill = os.path.join(os.path.dirname(here), ".agents", "skills", "team-setup", "
 prompt = (teamcfg.template(cfg, "roles/coordinator.md").replace("{project}", name)
           .replace("{state_dir}", cfg["project"]["state_dir"]).replace("{config}", cfg["config_path"])
           .replace("{team_setup}", skill))
+if not cfg["project"]["team_setup"]:  # never tailored: offer the setup before anything else
+    prompt += ("\n\nFirst message: team setup has not been run in this workspace ([project].team_setup is empty in "
+               f"{cfg['config_path']}). Whatever the user's first message says, do not answer it yet. Reply only with: "
+               "\"You have not ran `team-setup` in this workspace, do you want to do that now?\" and the options Yes and "
+               "No (in Claude Code ask with the AskUserQuestion tool; in Codex use request_user_input when available, "
+               f"otherwise list the two options and wait). Yes: follow {skill}, then come back to the first message. "
+               "No: answer the first message as usual.")
 if producer["cli"] == "codex":
-    argv = ["codex", "--model", producer["model"], "-c", f'model_reasoning_effort="{producer["effort"]}"',
+    # `team` starts agents that need network and write outside the project (journal, CLI state): a sandboxed
+    # coordinator cannot run it. Approvals still follow the user's Codex config; agents get their own sandbox.
+    argv = ["codex", "-s", "danger-full-access", "--model", producer["model"], "-c", f'model_reasoning_effort="{producer["effort"]}"',
             "-c", f"developer_instructions={json.dumps(prompt)}"]
 else:
     argv = ["claude", "--model", producer["model"], "--effort", producer["effort"], "-n", f"{name} team",

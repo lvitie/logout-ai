@@ -45,7 +45,8 @@ def check(seen):
     for tid, status, reason in team.wait_events(seen):
         notify(f"{NAME}: {tid} {status}", reason[:180], status != "done")
         print(f"\a{time.strftime('%H:%M')} {tid} {status}: {reason[:180]}", flush=True)
-        review.append(tid)
+        if tid != "refill":  # proposals live in the queue file, not on a task page
+            review.append(tid)
     if review:  # one page for everything that changed in this pass
         subprocess.run([sys.executable, os.path.join(HERE, "review_page"), *review, "--open"], **QUIET)
 

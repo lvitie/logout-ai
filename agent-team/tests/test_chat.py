@@ -38,6 +38,7 @@ class ChatTests(unittest.TestCase):
                 self.assertEqual(record['args'][-1], 'request with spaces')
                 self.assertIn('claude-sonnet-5-5', record['args'])
                 if cli == 'codex':
+                    self.assertEqual(record['args'][:2], ['-s', 'danger-full-access'])  # `team` needs it
                     options = dict(arg.split('=', 1) for arg in record['args'] if '=' in arg)
                     self.assertEqual(json.loads(options['model_reasoning_effort']), 'low')
                     prompt = json.loads(options['developer_instructions'])
@@ -51,6 +52,23 @@ class ChatTests(unittest.TestCase):
                 self.assertTrue(skill.is_file())
                 self.assertIn(str(project / 'team.toml'), prompt)
                 self.assertNotIn('{', prompt)
+                self.assertIn('You have not ran `team-setup` in this workspace, do you want to do that now?', prompt)
+
+    def test_no_setup_offer_after_setup(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fake = root / 'bin'
+            fake.mkdir()
+            (root / 'team.toml').write_text((ROOT / 'templates/team.toml').read_text()
+                                            .replace('team_setup = ""', 'team_setup = "2026-10-19"'))
+            (fake / 'claude').write_text(f'#!{sys.executable}\nimport json, sys\nprint(json.dumps(sys.argv[1:]))\n')
+            (fake / 'claude').chmod(0o755)
+            env = dict(os.environ, PATH=f'{fake}:{os.environ["PATH"]}', TEAM_CONFIG=str(root / 'team.toml'))
+            result = subprocess.run([sys.executable, str(ROOT / 'chat')], env=env, capture_output=True, text=True,
+                                    timeout=15)
+            args = json.loads(result.stdout)
+            prompt = args[args.index('--append-system-prompt') + 1]
+            self.assertNotIn('You have not ran `team-setup`', prompt)
 
     def test_invalid_config_does_not_launch(self):
         with tempfile.TemporaryDirectory() as tmp:

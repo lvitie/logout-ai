@@ -83,6 +83,9 @@ written before the user confirms the proposal.
      and `{domains}` instead of hard-coding those values.
    - Do not override `jobs/` or `vcs/` unless the user asked for it. The
      STATUS, VERDICT, ROUTE, DOMAIN, and TITLE lines are parsed by the team.
+   - Set `[project] team_setup = "<today, YYYY-MM-DD>"` in `team.toml` (add the
+     key when it is missing). It tells the coordinator that setup has run, so
+     it stops offering it.
 5. Validate:
    - Run `team status`. It loads `team.toml` and rejects unknown role names in
      `[routing]`; fix any error it reports.

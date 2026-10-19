@@ -17,7 +17,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 CANONICAL_ROLES = ("producer", "mid", "senior", "architect", "director")
 DEFAULTS = {
-    "project": {"name": "project", "root": ".", "state_dir": ".agent-team", "templates_dir": "",
+    "project": {"name": "project", "root": ".", "state_dir": ".agent-team", "templates_dir": "", "team_setup": "",
                 "docs": ["AGENTS.md", "SPEC.md", "ROADMAP.md", "TASKS.md", "docs/"],
                 "queue_file": "queue.txt", "planning_file": "TASKS.md"},
     "vcs": {"kind": "git", "guard_names": ["git"], "deny": {}, "deny_flags": {}},
@@ -28,6 +28,7 @@ DEFAULTS = {
                 "pipeline": {}, "side_task_reviewer": "architect", "side_task_roles": [],
                 "side_task_domains": {}, "takeover": {}, "after_impl_fails": {}, "capacity_fallback": {},
                 "usage": {"enabled": False}},
+    "queue": {"refill": True, "low_water": 1, "batch": 3, "daily_cap": 10, "pause_needs_you": 2, "cooldown_min": 30},
     "prompts": {"readonly_note": "Read-only stage: use tools only to inspect, never to change."},
     "notify": {"app_name": "", "sound_dir": "", "sound_normal": "message.oga", "sound_urgent": "alarm-clock-elapsed.oga"},
     "probes": {},

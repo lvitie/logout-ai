@@ -58,6 +58,9 @@ team drop <id> ["note"]
 team review [id ...]              # build and open the HTML review page (default: the latest done tasks)
 team queue [--once]               # start queued tasks as capacity frees up (the alerts pane does this)
 team wait [--no-block]            # block until a task needs attention or finishes, print it, exit
+team refill                       # ask the Producer for the next tasks now (pNNN lines in queue.txt)
+team promote <key ...>|all        # queue planned queue.txt lines (proposals or your own) as tasks
+team reject <key ...> [--why ..]  # drop planned lines; the Producer will not propose them again
 team-up                           # dashboard: usage, focus, live log, tasks, alerts, coordinator chat
 team-up "request"                 # same as team new
 ./team.sh                         # install missing dependencies and open the dashboard
@@ -106,7 +109,19 @@ The coordinator chat may edit the team config, its role prompts, the hand-edited
 itself; project work still goes through `team new`. To tailor the team, ask the coordinator to set it up: it
 follows the `team-setup` skill (`.agents/skills/team-setup/SKILL.md`, passed to both CLIs by path), which
 interviews you about the project, proposes roles, models, domains, routing, locks, probes and shared rules, and
-writes `team.toml` and `<templates_dir>/roles/*.md` only after you confirm.
+writes `team.toml` and `<templates_dir>/roles/*.md` only after you confirm. It records the date in
+`[project] team_setup`; while that is empty, the coordinator's first reply in a session asks whether to run the setup
+now (Yes/No) instead of answering.
+
+Queue refill (`[queue]`, on by default): when queued tasks plus planned `queue.txt` lines drop below `low_water`
+(1) and a slot is free, a queue pass starts `team refill` in the background. The Producer (read-only) reads the
+planning file's current phase, then `ROADMAP.md`, and proposes up to `batch` (3) tasks, skipping user-owned items
+and everything done, in flight, pending or rejected (it is shown that list). Proposals are appended as
+`pNNN: <request>` lines; nothing runs until `team promote` turns lines into queued tasks in place (order and
+`(after tNNN)` notes kept) or `team reject` drops them. `team wait` and the alerts pane report `refill proposed`,
+`refill empty` (no planned work left) and `refill failed`. Refill pauses while `pause_needs_you` (2) tasks wait for
+the user, after `daily_cap` (10) proposals a day, for `cooldown_min` (30) between runs, after an empty result until
+the planning file, `ROADMAP.md` or the number of done tasks changes, and while Claude usage is low.
 
 `team` finds the config through `--config <path>` (before the subcommand), else `$TEAM_CONFIG`, else the nearest `team.toml` above the current directory. `teamcfg.load` rejects unknown role names anywhere in `[routing]`.
 
@@ -147,6 +162,7 @@ writes `team.toml` and `<templates_dir>/roles/*.md` only after you confirm.
 - `[routing]`: `pipeline.simple|complex|hard` (stage kind + role lists), `domains`, `review_extra_domains`,
   `extra_review_routes`, `extra_review_role`, `domain_roles`, `side_task_*`, `takeover.<role>`,
   `after_impl_fails`, `capacity_fallback`, `max_rounds`, `max_parallel`, `long_stage_min`.
+- `[queue]`: `refill`, `low_water`, `batch`, `daily_cap`, `pause_needs_you`, `cooldown_min` (see above).
 - `[routing.usage]`: optional Claude/Codex plan balancing (`enabled = false` by default): `claude_fallback`,
   `limits`, `scoped_limit`, `surplus_swap`, `burst_swap`, `burst_file`, `cheap_first`, `no_burst_effort`,
   `escalation_gate`. Needs both CLIs and `usage_tui` data.
@@ -199,7 +215,7 @@ each task waits, and today's finished tasks. A task counts as running only while
 ## State and runtime inputs
 
 Per project, under `state_dir`: `live.log`, `tNNN/` task folders (`state.json`, `.lock-run` held while it runs, hand-offs, `logs/`, `opened.txt`,
-`changes.diff`, `user_opened.txt`, `packet/`), `.lock-*`, `.wait-seen.json`, `guard-bin/`, `team.kdl`, `review/`. Optional inputs you
+`changes.diff`, `user_opened.txt`, `packet/`), `.lock-*`, `.wait-seen.json`, `refill/` (refill runs and the proposal log), `guard-bin/`, `team.kdl`, `review/`. Optional inputs you
 create by hand: `queue.txt` (`tNNN: title` lines; their order and `(after tNNN)` notes drive the queue), `decisions.md` (shown by `review_page`), `role_override.json`
 (`{"t012": {"review": "director", "implement": "senior", "after_failed_reviews": 1}}`) and the `burst_file`
 (epoch deadline).
@@ -214,6 +230,8 @@ dump, set it as Claude Code's `statusLine` command.
 ## Credentials and network
 
 - Agents run `claude -p` and `codex exec` with the user's own logins; the team never reads or copies them.
+- The Codex coordinator chat runs with `-s danger-full-access`, like the unsandboxed Claude one: `team` starts agents
+  that need network and write outside the project. Approval prompts follow the user's Codex config.
 - Claude runs with `--permission-mode auto`; read-only stages are limited to `Read,Glob,Grep`. Codex runs with
   `-s read-only` for read-only stages and `-s workspace-write` for implementers, whatever `$CODEX_HOME/config.toml`
   sets.

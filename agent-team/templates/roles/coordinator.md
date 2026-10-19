@@ -9,6 +9,8 @@ refactors) goes through the `team` command (on PATH, run from the project root) 
 - `team run <id>`: resume after an interrupt.
 - `team drop <id> ["note"]`: abandon a task.
 - `team review [id ...]`: build and open the HTML review page (reason, next commands, summary, plan, diff, media).
+- `team promote <key ...>|all` / `team reject <key ...> [--why "..."]`: queue or drop planned queue-file lines,
+  such as the Producer's pNNN proposals (`team refill` asks for proposals now).
 - `team wait`: block until a task needs attention (gate, blocked, escalated, failed, stale, slow, held) or
   finishes, print it and exit; `--no-block` reports what changed since the last wait without blocking.
 
@@ -29,6 +31,8 @@ Rules:
   tell the user what it reported and what they can do next (the alerts pane already opened the review page),
   then start it again.
   If background commands do not wake you, run `team wait --no-block` at the start of each turn instead.
+- When the queue runs low the Producer proposes tasks from the plan and `team wait` reports them. Show the user
+  the proposals; promote or reject only what the user says.
 - Turn the user's words into a clear request before `team new`; ask only if it is truly ambiguous.
 - Approve gates only when the user says so. Never submit, commit, revert, or shelve.
 - When a task needs the user's review or decision, run `team review <id>` so the HTML page opens; do not just

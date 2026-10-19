@@ -580,7 +580,7 @@ def _run_agent_once(s, kind, role, *, selection=None):
     stem = f"{s['n']:02d}-{kind}-{role}"
     out, raw = d / f"{stem}.md", d / "logs" / f"{stem}.jsonl"
     raw.parent.mkdir(exist_ok=True)
-    if kind != "route":
+    if kind not in ("route", "refill"):
         write_snapshot(s)
     text = build_prompt(s, kind, role)
     (d / "logs" / f"{stem}.prompt.md").write_text(text)
@@ -902,25 +902,285 @@ def dispatch():
             continue
         logs = task_dir(s["id"]) / "logs"
         logs.mkdir(exist_ok=True)
-        detach = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW}
-                  if os.name == "nt" else {"start_new_session": True})  # survives the dashboard closing
         with (logs / "queue-run.log").open("a") as out:
             _spawned[s["id"]] = subprocess.Popen(
                 [sys.executable, str(HERE / "team.py"), "--config", CFG["config_path"], "run", "--queued", s["id"]], cwd=WS,
-                stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT, **detach)
+                stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT, **detach_kw())
         live(f"[{s['id']}] queue: starting", echo=False)
         active.add(s["id"])
         busy |= res
         started.append(s["id"])
+    if not refill_blocker(tasks, active):
+        logs = RUNS / "refill" / "logs"
+        logs.mkdir(parents=True, exist_ok=True)
+        with (logs / "refill-run.log").open("a") as out:
+            _spawned["refill"] = subprocess.Popen(
+                [sys.executable, str(HERE / "team.py"), "--config", CFG["config_path"], "refill"], cwd=WS,
+                stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT, **detach_kw())
+        live("[refill] queue low: asking the Producer for the next tasks", echo=False)
     return started
+
+
+def detach_kw():
+    """Popen options that keep a background run alive when the dashboard or shell that started it closes."""
+    return ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW}
+            if os.name == "nt" else {"start_new_session": True})
+
+
+# --- Queue refill: the Producer proposes the next tasks from the plan; the user promotes or rejects them ---
+
+def refill_state():
+    """The refill pseudo-task in <state_dir>/refill/state.json: agent-run fields plus the proposal log."""
+    try:
+        s = json.loads((RUNS / "refill" / "state.json").read_text())
+    except (OSError, ValueError):
+        s = {}
+    base = {"id": "refill", "change": "-", "request": "", "title": "queue refill", "route": None, "domain": None,
+            "status": "idle", "reason": "", "n": 0, "plan_rounds": 0, "review_rounds": 0, "notes": [],
+            "plan_reviews": [], "reviews": [], "history": [], "last": 0, "empty_sig": None, "proposals": [],
+            "last_keys": [], "next_key": 1}
+    return {**base, **s} if isinstance(s, dict) else base
+
+
+def plan_signature():
+    """Changes when the plan or the finished work changes: an empty refill is retried only then."""
+    stamps = []
+    for name in (CFG["project"]["planning_file"], "ROADMAP.md"):
+        try:
+            stamps.append((WS / name).stat().st_mtime)
+        except OSError:
+            stamps.append(None)
+    return [stamps, sum(s["status"] == "done" for s in all_tasks())]
+
+
+def refill_blocker(tasks, active):
+    """Why a refill should not start now, or None. tasks: {id: state}; active: ids running or starting."""
+    Q = CFG["queue"]
+    if not Q["refill"]:
+        return "refill is off"
+    if "refill" in _spawned:
+        return "a refill is running"
+    queued = sum(s["status"] == "new" and bool(s.get("queued")) for s in tasks.values())
+    planned = sum(not re.fullmatch(r"t\d+", k) for k in queue_notes())  # proposals or lines waiting for the user
+    if queued + planned >= Q["low_water"]:
+        return "the queue is not low"
+    if len(active) >= MAX_PARALLEL:
+        return "every slot is busy"
+    if sum(s["status"] in ATTENTION for s in tasks.values()) >= Q["pause_needs_you"]:
+        return "tasks are waiting for the user"
+    r = refill_state()
+    now = time.time()
+    if refill_allowance(r) <= 0:
+        return "daily proposal cap reached"
+    if now - r["last"] < Q["cooldown_min"] * 60:
+        return "cooling down"
+    if r["empty_sig"] is not None and r["empty_sig"] == plan_signature():
+        return "no planned work left"
+    if claude_low():
+        return "Claude usage is low"
+    return None
+
+
+def refill_allowance(r):
+    """Proposals one refill may make: the batch, capped by what is left of today's daily_cap."""
+    Q = CFG["queue"]
+    today = datetime.now().date()
+    made = sum(datetime.fromtimestamp(p["t"]).date() == today and not p.get("user") for p in r["proposals"])
+    return min(Q["batch"], Q["daily_cap"] - made)
+
+
+def refill_request(r):
+    """What the Producer needs to avoid repeats: tasks, pending, promoted and rejected proposals."""
+    Q = CFG["queue"]
+    lines = [f"Propose up to {refill_allowance(r)} next tasks for the team. Sources, in order: unchecked items in the current "
+             f"phase of {CFG['project']['planning_file']}, then the next outcomes in ROADMAP.md. Skip items owned by "
+             "the user (\"Owner: user\", \"user-only\") and anything listed below as done, in flight, proposed or "
+             "rejected.", "", "Tasks:"]
+    tasks = all_tasks()
+    keep = [s for s in tasks if s["status"] not in ("done", "dropped")] + tasks[-60:]
+    for s in sorted({s["id"]: s for s in keep}.values(), key=lambda s: s["id"]):
+        lines.append(f"- {s['id']} {s['status']}: {' '.join((s['title'] or s['request']).split())[:160]}")
+    planned = [ln for k, ln in queue_notes().items() if not re.fullmatch(r"t\d+", k)]  # proposals and the user's
+    if planned:
+        lines += ["", f"Planned in {CFG['project']['queue_file']}:"] + [f"- {ln}" for ln in planned]
+    rejected = [p for p in r["proposals"] if p["status"] == "rejected"][-40:]
+    if rejected:
+        lines += ["", "Rejected:"] + [f"- {p['request']}" + (f" (why: {p['why']})" if p.get("why") else "")
+                                      for p in rejected]
+    return "\n".join(lines)
+
+
+def _queue_file_lock():
+    f = (RUNS / ".lock-queue-file").open("a")
+    teamcfg.lock(f)  # blocking: refill appends and promote/reject rewrite the same file
+    return f
+
+
+def cmd_refill(a):
+    """One refill: the Producer reads the plan and proposes tasks, appended to the queue file as pNNN lines."""
+    (RUNS / "refill").mkdir(parents=True, exist_ok=True)
+    lk = (RUNS / ".lock-refill").open("a")
+    try:
+        teamcfg.lock(lk, blocking=False)
+    except BlockingIOError:
+        sys.exit("A refill is already running.")
+    held = [lk]
+    try:
+        if refill_allowance(refill_state()) <= 0:  # capped is not exhausted: record nothing
+            sys.exit("Daily proposal cap reached; the refill runs tomorrow.")
+        if take_capacity([], held):  # the Producer run counts against max_parallel like any other
+            sys.exit("Every team slot is busy; the refill runs later.")
+        _refill()
+    finally:
+        for f in held:
+            f.close()
+
+
+def _refill():
+    """The Producer run of a refill and its result, with the refill and slot locks held."""
+    r = _update_refill(lambda r: r.update(status="running", reason="", last=time.time(), request=refill_request(r)))
+    allowance, sig = refill_allowance(r), plan_signature()  # the plan as the Producer reads it
+    new = []
+    try:
+        out, text = run_agent(r, "refill", "producer")
+    except Exception as e:  # e.g. the CLI is missing: a running state left behind would hide the failure
+        out, text = None, None
+        r["status"], r["reason"] = "failed", f"Producer could not run: {e}"
+
+    def finish(cur):  # merge into the current log: promote/reject may have run meanwhile
+        cur.update(status=r["status"], reason=r["reason"], n=r["n"], history=r["history"],
+                   last_keys=[p["key"] for p in new], next_key=int(new[-1]["key"][1:]) + 1 if new else r["next_key"],
+                   empty_sig=sig if r["status"] == "done" and not new else None)
+        cur["proposals"] += new
+    if not out:
+        _update_refill(finish)
+    else:
+        tagged = [m.strip() for m in re.findall(r"^\s*(?:[-*]\s+)?\**TASK:\**\s*(.+)$", text, re.M)]
+        found = [f for f in tagged if f.lower().strip(".`*") != "none"][:max(0, allowance)]
+        if not tagged:  # only an explicit "TASK: none" means the plan is exhausted; this stays retryable
+            r["status"], r["reason"] = "failed", f"Producer gave no TASK lines; see {out}"
+            _update_refill(finish)
+            live(f"[refill] {r['status']}: {r['reason']}")
+            return
+        with _queue_file_lock():  # lines and records appear together for promote/reject
+            path = RUNS / CFG["project"]["queue_file"]
+            old = path.read_text() if path.exists() else ""
+            used = {ln.split(":", 1)[0].strip() for ln in old.splitlines()} | {p["key"] for p in refill_state()["proposals"]}
+            n = r["next_key"]
+            for req in found:  # skip keys already in the queue file or the log (hand-written, interrupted refill)
+                while f"p{n:03d}" in used:
+                    n += 1
+                new.append({"key": f"p{n:03d}", "request": req, "t": time.time(), "status": "proposed"})
+                n += 1
+            if new:
+                _atomic_write(path, old + ("" if not old or old.endswith("\n") else "\n")  # dispatch reads unlocked
+                              + "".join(f"{p['key']}: {p['request']}\n" for p in new))
+            r["status"], r["reason"] = "done", (f"proposed {', '.join(p['key'] for p in new)}" if new
+                                                else "no planned work left")
+            _update_refill(finish)
+    live(f"[refill] {r['status']}: {r['reason']}")
+
+
+def _update_refill(fn):
+    """Locked read-modify-write of the refill state; returns the state written."""
+    (RUNS / "refill").mkdir(parents=True, exist_ok=True)
+    with (RUNS / ".lock-refill-log").open("a") as lk:
+        teamcfg.lock(lk)
+        r = refill_state()
+        fn(r)
+        _atomic_write(RUNS / "refill" / "state.json", json.dumps(r, indent=2))
+    return r
+
+
+def _rewrite_queue(keys, change):
+    """Apply change(key, request, after_note) -> new line or None (drop) to the queue file's non-task lines in keys
+    ("all" = every one). Returns the keys handled."""
+    done = []
+    with _queue_file_lock():
+        path = RUNS / CFG["project"]["queue_file"]
+        lines = path.read_text().splitlines() if path.exists() else []
+        out = []
+        for ln in lines:
+            key, _, rest = ln.partition(":")
+            key = key.strip()
+            if (ln.strip() and not ln.lstrip().startswith("#") and rest and not re.fullmatch(r"t\d+", key)
+                    and ("all" in keys or key in keys)):
+                after = re.search(r"\s*\(after [^)]*\)", rest)
+                new = change(key, (rest[:after.start()] + rest[after.end():] if after else rest).strip(),
+                             after[0].strip() if after else "")
+                done.append(key)
+                if new is not None:
+                    out.append(new)
+            else:
+                out.append(ln)
+        _atomic_write(path, "\n".join(out) + ("\n" if out else ""))
+    return done
+
+
+def _mark_proposals(updates):
+    """{key: fields} merged into the refill log's proposals."""
+    _update_refill(lambda r: [p.update(updates.get(p["key"], {})) for p in r["proposals"]])
+
+
+def cmd_promote(a):
+    """Turn planned queue lines (proposals or your own) into queued tasks, in place, so order and after-notes hold."""
+    made, errors = [], []  # (key, task id): a hand-written key may repeat
+
+    def promote(key, request, after):
+        try:
+            s = create_task(request)  # not queued yet: the runner must see its queue line and after-note first
+        except SystemExit as e:  # e.g. no change could be created: keep the line, carry on with the others
+            errors.append(f"{key}: {e}")
+            return f"{key}: {request}" + (f" {after}" if after else "")
+        made.append((key, s["id"]))
+        return f"{s['id']}: {request}" + (f" {after}" if after else "")
+    done = _rewrite_queue(set(a.keys), promote)
+    for _, tid in made:
+        s = load(tid)
+        s.update(queued=True, reason="queued")
+        save(s)
+    _mark_proposals({k: {"status": "promoted", "task": tid} for k, tid in made})
+    for k, tid in made:
+        print(f"{k} -> {tid} (queued)")
+    missing = set(a.keys) - set(done) - {"all"}
+    if missing:
+        errors.append(f"Not a planned line in the queue file: {', '.join(sorted(missing))}")
+    if errors:
+        sys.exit("\n".join(errors))
+
+
+def cmd_reject(a):
+    """Drop planned queue lines; rejected proposals are shown to the Producer so it does not propose them again."""
+    requests = {}
+    done = _rewrite_queue(set(a.keys), lambda key, request, after: requests.update({key: request}))  # None: drop
+
+    def reject(r):
+        known = {p["key"] for p in r["proposals"]}
+        for p in r["proposals"]:
+            if p["key"] in requests:
+                p.update(status="rejected", why=a.why)
+        r["proposals"] += [{"key": k, "request": req, "t": time.time(), "status": "rejected", "why": a.why, "user": True}
+                           for k, req in requests.items() if k not in known]  # your own lines are remembered too
+    _update_refill(reject)
+    for k in done:
+        print(f"{k} rejected")
+    missing = set(a.keys) - set(done) - {"all"}
+    if missing:
+        sys.exit(f"Not a planned line in the queue file: {', '.join(sorted(missing))}")
 
 
 ATTENTION = ("gate", "blocked", "escalated", "failed")
 
 
 def first_seen():
-    """Seen map for a new watcher: finished tasks are old news, everything that needs attention gets reported."""
-    return {s["id"]: [s["status"], s.get("n", 0)] for s in all_tasks() if s["status"] in ("done", "dropped")}
+    """Seen map for a new watcher: finished tasks and the last refill are old news, the rest that needs attention
+    gets reported."""
+    r = refill_state()
+    seen = {s["id"]: [s["status"], s.get("n", 0)] for s in all_tasks() if s["status"] in ("done", "dropped")}
+    pending = any(p["status"] == "proposed" and p["key"] in r["last_keys"] for p in r["proposals"])
+    if pending or r["status"] == "failed":  # still needs the user, like a failed task
+        return seen
+    return {**seen, "refill": [r["status"], r["n"]]}
 
 
 def wait_events(seen):
@@ -956,6 +1216,28 @@ def wait_events(seen):
         seen[s["id"]] = key
         if st in ATTENTION or st in ("done", "stale", "slow", "held"):
             events.append((s["id"], st, " ".join(text.split())))
+    r = refill_state()
+    st = r["status"]
+    if st == "running":  # killed mid-run if nobody holds the refill lock
+        try:
+            with (RUNS / ".lock-refill").open("a") as lk:
+                teamcfg.lock(lk, blocking=False)
+                st = "stale"
+        except (BlockingIOError, OSError):
+            pass
+    if st in ("done", "failed", "stale") and seen.get("refill") != [st, r["n"]]:
+        seen["refill"] = [st, r["n"]]
+        if st == "stale":
+            events.append(("refill", "stale", "the last refill was interrupted; the next queue pass retries it after "
+                           "the cooldown"))
+        elif st == "failed":
+            events.append(("refill", "failed", r["reason"]))
+        elif r["last_keys"]:
+            events.append(("refill", "proposed", f"{', '.join(r['last_keys'])} in {CFG['project']['queue_file']}: "
+                           f"`team promote <key>|all` to queue them, `team reject <key> [--why \"...\"]` to drop"))
+        else:
+            events.append(("refill", "empty", f"no planned work left in {CFG['project']['planning_file']} or "
+                           "ROADMAP.md; add items to refill the queue"))
     return events
 
 
@@ -1000,6 +1282,13 @@ def stage_label(s):
 
 
 def cmd_new(a):
+    s = create_task(a.request, a.res, a.role)
+    if not a.no_run:
+        advance(s)
+
+
+def create_task(request, res_arg="", role=None, queued=False):
+    """A new task folder, change and state; queued ones are started by the queue runner."""
     RUNS.mkdir(parents=True, exist_ok=True)
     n = max([int(p.name[1:]) for p in RUNS.glob("t[0-9]*") if p.name[1:].isdigit()] + [0]) + 1
     while True:  # the folder claims the id: two `team new` at once get different ones
@@ -1010,24 +1299,25 @@ def cmd_new(a):
         except FileExistsError:
             n += 1
     try:
-        change = VCS.new_change(f"[team {tid}] {a.request.splitlines()[0][:60]}", tid)
+        change = VCS.new_change(f"[team {tid}] {request.splitlines()[0][:60]}", tid)
     except (RuntimeError, OSError) as e:
         task_dir(tid).rmdir()
         sys.exit(f"Could not create a change: {e}")
     names = CFG["locks"]["names"]
-    res = [r for r in a.res.split(",") if r in names or r == "none"] if a.res else list(CFG["locks"]["default"])
+    res = [r for r in res_arg.split(",") if r in names or r == "none"] if res_arg else list(CFG["locks"]["default"])
     res = res or list(CFG["locks"]["default"])
-    s = {"id": tid, "request": a.request, "change": str(change), "title": "", "route": None, "domain": None,
+    s = {"id": tid, "request": request, "change": str(change), "title": "", "route": None, "domain": None,
          "stage": -1, "status": "new", "reason": "", "n": 0, "plan_rounds": 0, "review_rounds": 0,
          "res": res, "notes": [], "plan_reviews": [], "reviews": [], "history": [],
          "created": time.time(), "stage_started": None, "finished": None}
-    if a.role:  # parallel side task: skip routing, the named role implements
-        s.update(route=f"custom:{a.role}", stage=0, title=a.request.splitlines()[0][:60],
-                 domain=CFG["routing"]["side_task_domains"].get(a.role, CFG["routing"]["domains"][0]))
+    if role:  # parallel side task: skip routing, the named role implements
+        s.update(route=f"custom:{role}", stage=0, title=request.splitlines()[0][:60],
+                 domain=CFG["routing"]["side_task_domains"].get(role, CFG["routing"]["domains"][0]))
+    if queued:
+        s.update(queued=True, reason="queued")
     save(s)
     live(f"[{tid}] created, {noun()} {s['change']}")
-    if not a.no_run:
-        advance(s)
+    return s
 
 
 def cmd_run(a):
@@ -1160,6 +1450,15 @@ def main():
     p = sub.add_parser("queue", help="start queued (new) tasks as slots and locks free up; the alerts pane does this")
     p.add_argument("--once", action="store_true", help="one pass, then exit")
     p.set_defaults(func=cmd_queue)
+    p = sub.add_parser("refill", help="ask the Producer to propose the next tasks from the plan (queue file pNNN lines)")
+    p.set_defaults(func=cmd_refill)
+    p = sub.add_parser("promote", help="queue planned lines from the queue file as tasks (pNNN, your own keys, or all)")
+    p.add_argument("keys", nargs="+")
+    p.set_defaults(func=cmd_promote)
+    p = sub.add_parser("reject", help="drop planned lines; the Producer will not propose them again")
+    p.add_argument("keys", nargs="+")
+    p.add_argument("--why", default="", help="reason shown to the Producer")
+    p.set_defaults(func=cmd_reject)
     p = sub.add_parser("wait", help="block until a task needs attention or finishes, print it and exit")
     p.add_argument("--no-block", action="store_true", help="report what changed since the last wait and exit")
     p.set_defaults(func=cmd_wait)

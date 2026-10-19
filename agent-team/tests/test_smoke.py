@@ -38,7 +38,8 @@ class Project(unittest.TestCase):
         self.git("init", "-q")
         self.git("config", "user.email", "t@example.com")
         self.git("config", "user.name", "t")
-        (self.proj / "team.toml").write_text(TOML.replace('name = "myproject"', 'name = "demo"'))
+        (self.proj / "team.toml").write_text(TOML.replace('name = "myproject"', 'name = "demo"')
+                                             .replace("refill = true", "refill = false"))  # refill tests opt in
         (self.proj / "README.md").write_text("hello\n")
         self.git("add", "-A")
         self.git("commit", "-qm", "init")
@@ -320,6 +321,127 @@ class Project(unittest.TestCase):
         f = team.run_lock("t001", patience=2)
         self.assertIsNotNone(f)
         f.close()
+
+    def producer_proposes(self, *tasks):
+        result = "Next tasks:\n" + "".join(f"TASK: {t}\n" for t in tasks)
+        self.fake_claude(f"cat > /dev/null\necho {json.dumps(json.dumps({'type': 'result', 'result': result}))}\n")
+
+    def test_refill_keys_do_not_collide(self):
+        (self.proj / ".agent-team").mkdir()
+        (self.proj / ".agent-team/queue.txt").write_text("p001: mine\n")
+        self.producer_proposes("from the plan")
+        self.team("refill")
+        self.assertEqual((self.proj / ".agent-team/queue.txt").read_text(), "p001: mine\np002: from the plan\n")
+        out = self.team("promote", "all").stdout
+        self.assertIn("p001 -> t001", out)
+        self.assertIn("p002 -> t002", out)
+        self.assertTrue(self.state("t001")["queued"] and self.state("t002")["queued"])
+
+    def test_refill_proposes_promote_and_reject(self):
+        self.team("new", "--no-run", "already here")
+        self.set_state("t001", status="done", title="already here")
+        self.producer_proposes("add a settings page", "write the setup docs")
+        self.team("refill")
+        queue = (self.proj / ".agent-team/queue.txt").read_text()
+        self.assertEqual(queue, "p001: add a settings page\np002: write the setup docs\n")
+        prompt = (self.proj / ".agent-team/refill/logs/01-refill-producer.prompt.md").read_text()
+        self.assertIn("t001 done: already here", prompt)
+        self.assertIn("TASK: <request>", prompt)
+        out = self.team("wait", "--no-block").stdout
+        self.assertIn("refill proposed: p001, p002 in queue.txt", out)
+        self.assertIn("p001 -> t002 (queued)", self.team("promote", "p001").stdout)
+        self.assertTrue(self.state("t002")["queued"])
+        self.team("reject", "p002", "--why", "docs come later")
+        self.assertEqual((self.proj / ".agent-team/queue.txt").read_text(), "t002: add a settings page\n")
+        self.assertIn("Not a planned line", self.team("promote", "p009", ok=False).stderr)
+        from types import SimpleNamespace
+        from unittest import mock
+        import team
+        team.init(self.proj / "team.toml")
+        with (self.proj / ".agent-team/queue.txt").open("a") as q:
+            q.write("a1: first\na2: second\n")
+        real, calls = team.VCS.new_change, []
+
+        def flaky(desc, hint):  # the second change cannot be created
+            calls.append(hint)
+            if len(calls) == 2:
+                raise RuntimeError("server down")
+            return real(desc, hint)
+        with mock.patch.object(team.VCS, "new_change", flaky), mock.patch("os.environ", self.env), \
+                self.assertRaises(SystemExit):
+            team.cmd_promote(SimpleNamespace(keys=["a1", "a2"]))
+        queue = (self.proj / ".agent-team/queue.txt").read_text()
+        self.assertIn("t003: first", queue)  # kept and queued despite the later failure
+        self.assertIn("a2: second", queue)
+        self.assertTrue(self.state("t003")["queued"])
+        self.team("reject", "a2", "--why", "not this quarter")
+        self.assertIn({"key": "a2", "request": "second", "status": "rejected", "why": "not this quarter", "user": True},
+                      [{k: v for k, v in p.items() if k != "t"} for p in team.refill_state()["proposals"]])
+        with (self.proj / ".agent-team/queue.txt").open("a") as q:
+            q.write("mine: tidy the logs\n")
+        self.producer_proposes("none")
+        self.team("refill")
+        prompt = (self.proj / ".agent-team/refill/logs/02-refill-producer.prompt.md").read_text()
+        self.assertIn("write the setup docs (why: docs come later)", prompt)  # rejected: not proposed again
+        self.assertIn("- mine: tidy the logs", prompt)  # planned by the user: not proposed again
+        self.assertIn("refill empty: no planned work left", self.team("wait", "--no-block").stdout)
+
+    def test_refill_needs_a_slot_and_tagged_output(self):
+        self.fake_claude("cat > /dev/null\necho '{\"type\": \"result\", \"result\": \"could not read the plan\"}'\n")
+        self.team("refill")
+        self.assertIn("refill failed: Producer gave no TASK lines", self.team("wait", "--no-block").stdout)
+        import team
+        team.init(self.proj / "team.toml")
+        self.assertIsNone(team.refill_state()["empty_sig"])  # still retryable after the cooldown
+        held = [(self.proj / f".agent-team/.lock-slot{i}").open("a") for i in range(3)]
+        for f in held:
+            teamcfg.lock(f, blocking=False)
+        r = self.team("refill", ok=False)
+        self.assertIn("Every team slot is busy", r.stderr)
+        self.assertEqual(team.refill_state()["n"], 1)  # no second Producer run
+        for f in held:
+            f.close()
+        (self.fake / "claude").unlink()  # the Producer CLI cannot start; no real claude may be found either
+        self.env["PATH"] = f"{self.fake}:/usr/bin:/bin"
+        self.team("refill")
+        self.assertIn("refill failed: Producer could not run", self.team("wait", "--no-block").stdout)
+        team._update_refill(lambda r: r.update(status="running", n=9))  # a refill killed mid-run
+        self.assertIn("refill stale: the last refill was interrupted", self.team("wait", "--no-block").stdout)
+
+    def test_refill_triggers_only_when_due(self):
+        import team
+        cfg = self.proj / "team.toml"
+        cfg.write_text(cfg.read_text().replace("refill = false", "refill = true"))
+        team.init(cfg)
+        team._spawned.clear()
+        self.assertIsNone(team.refill_blocker({}, set()))
+        self.assertIsNone(team.refill_blocker({"t001": {"status": "new"}}, set()))  # --no-run: no queued field
+        (self.proj / ".agent-team").mkdir(exist_ok=True)
+        (self.proj / ".agent-team/queue.txt").write_text("p001: waiting for the user\n")
+        self.assertEqual(team.refill_blocker({}, set()), "the queue is not low")
+        (self.proj / ".agent-team/queue.txt").write_text("")
+        gates = {f"t00{i}": {"status": "gate"} for i in (1, 2)}
+        self.assertEqual(team.refill_blocker(gates, set()), "tasks are waiting for the user")
+        self.assertEqual(team.refill_blocker({}, {"t1", "t2", "t3"}), "every slot is busy")
+        nine = [{"key": f"p{i:03d}", "request": "x", "t": time.time(), "status": "rejected"} for i in range(9)]
+        team._update_refill(lambda r: r.update(proposals=nine))
+        self.assertEqual(team.refill_allowance(team.refill_state()), 1)  # 10 a day, not 9 + a batch of 3
+        team._update_refill(lambda r: r.update(proposals=nine + [dict(nine[0], key="p009")]))
+        self.assertIn("Daily proposal cap", self.team("refill", ok=False).stderr)
+        self.assertIsNone(team.refill_state()["empty_sig"])  # capped is not "no planned work left"
+        team._update_refill(lambda r: r.update(proposals=[]))
+        team._update_refill(lambda r: r.update(last=time.time()))
+        self.assertEqual(team.refill_blocker({}, set()), "cooling down")
+        team._update_refill(lambda r: r.update(last=0, empty_sig=team.plan_signature()))
+        self.assertEqual(team.refill_blocker({}, set()), "no planned work left")
+        (self.proj / "TASKS.md").write_text("## Current phase\n- [ ] new item\n")  # the plan changed
+        self.assertIsNone(team.refill_blocker({}, set()))
+        self.producer_proposes("from the queue pass")
+        self.team("queue", "--once")  # dispatch starts the refill in the background
+        deadline = time.time() + 30
+        while "p001" not in ((self.proj / ".agent-team/queue.txt").read_text()):
+            self.assertLess(time.time(), deadline, "the queue pass never refilled")
+            time.sleep(0.2)
 
     def test_windows_shims(self):
         """npm .cmd shims are bypassed for their node script; guard names get .cmd and sh shims, not symlinks."""
