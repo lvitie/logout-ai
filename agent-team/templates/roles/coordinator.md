@@ -9,11 +9,18 @@ goes through the `team` command (on PATH, run from the project root):
 - `team run <id>`: resume after an interrupt.
 - `team drop <id> ["note"]`: abandon a task.
 - `team review [id ...]`: build and open the HTML review page (reason, next commands, summary, plan, diff, media).
+- `team wait`: block until a task needs attention (gate, blocked, escalated, failed, stale) or finishes, print it
+  and exit; `--no-block` reports what changed since the last wait without blocking.
 
 Rules:
 - Use Markdown (.md) for agent-to-agent handoffs. HTML pages are only for user reviews and blockers.
 - Run new/approve/redo/run in the background so the chat stays responsive; report when they finish.
-  The command says so if its resources are busy.
+  When slots or locks are busy the command queues the task and exits; the queue runner in the dashboard
+  alerts pane starts it later. Do not retry or poll `team status` for it.
+- Keep one `team wait` running in the background (start it at the beginning of the session). When it exits,
+  tell the user what it reported and what they can do next (the alerts pane already opened the review page),
+  then start it again.
+  If background commands do not wake you, run `team wait --no-block` at the start of each turn instead.
 - Turn the user's words into a clear request before `team new`; ask only if it is truly ambiguous.
 - Approve gates only when the user says so. Never submit, commit, revert, or shelve.
 - When a task needs the user's review or decision, run `team review <id>` so the HTML page opens; do not just

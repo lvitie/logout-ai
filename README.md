@@ -294,7 +294,10 @@ alerts pane, and has a coordinator chat where you can ask for work in plain
 language. Alerts sit at the top right, above tasks and the coordinator. When a task needs you (a gate, a question, a failure) or finishes,
 the alerts pane sends a desktop notification and opens an HTML review page with
 the reason, the commands for the next step, the summary, plan, diff, and media.
-The same actions are available as commands from the project directory:
+When every slot or lock is busy, a new or approved task is queued instead of
+refused, and the alerts pane starts it once capacity frees up. The coordinator
+keeps a `team wait` running, so it hears about gates, failures and finished
+tasks without polling. The same actions are available as commands from the project directory:
 
 ```text
 team new "add a stamina bar"     # create a task, route it, run the pipeline
@@ -303,6 +306,8 @@ team approve <id> ["note"]       # pass a gate, or retry after a failure
 team redo <id> "feedback"        # send the work back with feedback
 team drop <id> ["note"]          # abandon a task
 team review [id ...]             # open the HTML review page
+team queue                       # start queued tasks without the dashboard
+team wait                        # wait for the next task that needs attention
 ```
 
 When a task is `done`, review the working-tree diff (git) or the task's

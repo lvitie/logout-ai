@@ -106,9 +106,10 @@ def pipeline(route, domain):
     return stages
 
 
-def live(msg):
+def live(msg, echo=True):
     line = f"{time.strftime('%H:%M:%S')} {msg}"
-    print(line, flush=True)
+    if echo:
+        print(line, flush=True)
     RUNS.mkdir(parents=True, exist_ok=True)
     with LIVE.open("a") as f:
         f.write(line + "\n")
@@ -663,44 +664,66 @@ def resource_ok(name):
         return True
 
 
-def advance(s):
-    """Run a task. Tasks that need different resources ([locks]) run in parallel; the same resource is exclusive."""
+def take_capacity(res, held):
+    """A slot under max_parallel and the [locks] in res, appended to held; returns why the run must wait, or None."""
+    for name in [f"slot{i}" for i in range(MAX_PARALLEL)]:  # global concurrency cap
+        f = (RUNS / f".lock-{name}").open("a")
+        try:
+            teamcfg.lock(f, blocking=False)
+            held.append(f)
+            break
+        except BlockingIOError:
+            f.close()
+    else:
+        return f"{MAX_PARALLEL} team runs are already in progress"
+    for r in res:
+        f = (RUNS / f".lock-{r}").open("a")
+        try:
+            teamcfg.lock(f, blocking=False)
+        except BlockingIOError:
+            f.close()
+            return f"resource '{r}' is busy with another team run"
+        held.append(f)
+    return resource_low(res)
+
+
+def resource_low(res):
+    """Why the [locks] probes refuse a run holding res, or None."""
+    for r in res:
+        lc = CFG["locks"].get(r)
+        if isinstance(lc, dict) and lc.get("skip_if_holds") not in res and not resource_ok(r):
+            return f"not enough free resource '{r}' (< {lc.get('min_free_mib')} MiB) to run next to other jobs"
+    return None
+
+
+def advance(s, from_queue=False):
+    """Run a task. Tasks that need different resources ([locks]) run in parallel; the same resource is exclusive.
+    Without capacity the task is saved as new and queued (notes and stage kept); the queue runner starts it later."""
     RUNS.mkdir(parents=True, exist_ok=True)
-    res = s.get("res") or list(CFG["locks"]["default"])
+    res = [r for r in s.get("res") or CFG["locks"]["default"] if r != "none"]
     held = []
     try:
-        for name in [f"slot{i}" for i in range(MAX_PARALLEL)]:  # global concurrency cap
-            f = (RUNS / f".lock-{name}").open("a")
-            try:
-                teamcfg.lock(f, blocking=False)
-                held.append(f)
-                break
-            except BlockingIOError:
-                f.close()
-        else:
-            sys.exit(f"{MAX_PARALLEL} team runs are already in progress.")
-        f = run_lock(s["id"])
+        f = run_lock(s["id"])  # first: only the lock holder may save the state below
         if not f:
             sys.exit(f"{s['id']} is already running.")
         held.append(f)
-        res = [r for r in res if r != "none"]
-        for r in res:
-            f = (RUNS / f".lock-{r}").open("a")
-            try:
-                teamcfg.lock(f, blocking=False)
-            except BlockingIOError:
-                sys.exit(f"Resource '{r}' is busy with another team run.")
-            held.append(f)
-        for r in res:
-            lc = CFG["locks"].get(r)
-            if isinstance(lc, dict) and lc.get("skip_if_holds") not in res and not resource_ok(r):
-                sys.exit(f"Not enough free resource '{r}' (< {lc.get('min_free_mib')} MiB) to run next to other jobs.")
+        if from_queue:
+            s = load(s["id"])  # another runner may have started it since the dispatcher looked
+            if s["status"] != "new" or not s.get("queued"):
+                return
+        wait = take_capacity(res, held)
+        if wait:
+            s["status"], s["reason"], s["queued"] = "new", f"queued: {wait}", True
+            save(s)
+            live(f"[{s['id']}] queued: {wait}; the queue runner (dashboard alerts pane or `team queue`) starts it")
+            return
         if "created" not in s:
             s["created"] = task_times(s)["created"] or time.time()
         s["finished"] = None
         if stage_label(s) != "end":
             s["stage_started"] = time.time()
         s["status"], s["reason"] = "running", ""
+        s.pop("queued", None)
         save(s)
         while s["status"] == "running":
             previous_stage = s["stage"]
@@ -731,6 +754,130 @@ def run_lock(tid):
     except BlockingIOError:
         f.close()
         return None
+
+
+def all_tasks():
+    """Task states in id order; folders without a readable state.json are skipped."""
+    found = []
+    for d in sorted(RUNS.glob("t[0-9]*")):
+        try:
+            s = json.loads((d / "state.json").read_text())
+        except (OSError, ValueError):
+            continue
+        if isinstance(s, dict) and "id" in s:
+            found.append(s)
+    return found
+
+
+def run_held(tid):
+    """True while a team process holds the task's run lock (the probe takes it for an instant when free)."""
+    f = run_lock(tid)
+    if f:
+        f.close()
+    return f is None
+
+
+def queue_notes():
+    """{key: line} from the queue file in file order, comments skipped."""
+    try:
+        text = (RUNS / CFG["project"]["queue_file"]).read_text()
+    except OSError:
+        return {}
+    notes = {}
+    for ln in text.splitlines():
+        if ln.strip() and not ln.lstrip().startswith("#"):
+            notes.setdefault(ln.split(":", 1)[0].strip(), ln.strip())
+    return notes
+
+
+_spawned = {}  # tid -> Popen of runs this process started, so a run that is still starting is not started twice
+
+
+def dispatch():
+    """One queue pass: start queued tasks (refused for capacity, not `--no-run` ones) in queue-file order, then by id,
+    while slots and their [locks] are free and the tasks named in an `after tNNN` note are done. Runs are detached,
+    log to <task>/logs/queue-run.log and recheck under the run lock that the task is still queued."""
+    for tid in [t for t, p in _spawned.items() if p.poll() is not None]:
+        del _spawned[tid]
+    tasks = {s["id"]: s for s in all_tasks()}
+    active = {t for t, s in tasks.items() if s["status"] == "running" and run_held(t)} | set(_spawned)
+    busy = {r for t in active if t in tasks for r in tasks[t].get("res") or CFG["locks"]["default"]}
+    notes = queue_notes()
+    rank = {k: i for i, k in enumerate(notes)}
+    started = []
+    for s in sorted((s for t, s in tasks.items() if s["status"] == "new" and s.get("queued") and t not in active),
+                    key=lambda s: (rank.get(s["id"], len(rank)), s["id"])):
+        if len(active) >= MAX_PARALLEL:
+            break
+        dep = re.search(r"\bafter ([^)]*)", notes.get(s["id"], ""))
+        if dep and any(tasks.get(t, {}).get("status") != "done" for t in re.findall(r"\bt\d+\b", dep[1])):
+            continue
+        res = {r for r in s.get("res") or CFG["locks"]["default"] if r != "none"}
+        if res & busy or resource_low(res):  # a probe-blocked task must not take the slot of a runnable one
+            continue
+        logs = task_dir(s["id"]) / "logs"
+        logs.mkdir(exist_ok=True)
+        detach = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW}
+                  if os.name == "nt" else {"start_new_session": True})  # survives the dashboard closing
+        with (logs / "queue-run.log").open("a") as out:
+            _spawned[s["id"]] = subprocess.Popen(
+                [sys.executable, str(HERE / "team.py"), "--config", CFG["config_path"], "run", "--queued", s["id"]], cwd=WS,
+                stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT, **detach)
+        live(f"[{s['id']}] queue: starting", echo=False)
+        active.add(s["id"])
+        busy |= res
+        started.append(s["id"])
+    return started
+
+
+ATTENTION = ("gate", "blocked", "escalated", "failed")
+
+
+def wait_events(seen):
+    """[(id, status, text)] for tasks that changed into an attention state, stale (marked running, no process) or
+    done since seen ({id: [status, agent runs]}), which is updated in place."""
+    events = []
+    for s in all_tasks():
+        if s["status"] == "running" and (f := run_lock(s["id"])):
+            with f:  # nobody holds it: reread under the lock, the run may have saved its result since
+                s = load(s["id"])
+            s["status"] = "stale" if s["status"] == "running" else s["status"]
+        st = s["status"]
+        key = [st, s.get("n", 0)]  # the run count tells a repeated failure from the one already reported
+        if seen.get(s["id"]) == key:
+            continue
+        seen[s["id"]] = key
+        if st in ATTENTION or st in ("stale", "done"):
+            text = (f"marked running but its process is gone; resume with `team run {s['id']}`" if st == "stale"
+                    else s["reason"] or s["title"] or s["request"].splitlines()[0])
+            events.append((s["id"], st, " ".join(text.split())))
+    return events
+
+
+def cmd_wait(a):
+    """Block until a task needs attention or finishes, print those tasks and exit. What was reported is kept in
+    <state_dir>/.wait-seen.json, so changes between two waits are reported by the next one."""
+    path = RUNS / ".wait-seen.json"
+    try:
+        seen = json.loads(path.read_text())
+    except (OSError, ValueError):  # first wait: report what needs attention now, finished tasks are old news
+        seen = {s["id"]: [s["status"], s.get("n", 0)] for s in all_tasks() if s["status"] in ("done", "dropped")}
+    while not (events := wait_events(seen)) and not a.no_block:
+        time.sleep(5)
+    RUNS.mkdir(parents=True, exist_ok=True)
+    _atomic_write(path, json.dumps(seen))
+    for tid, st, text in events:
+        print(f"{tid} {st}: {text}")
+
+
+def cmd_queue(a):
+    """Queue runner: start queued tasks as capacity frees up (the dashboard alerts pane runs the same passes)."""
+    while True:
+        for tid in dispatch():
+            print(f"{time.strftime('%H:%M')} started {tid}", flush=True)
+        if a.once:
+            return
+        time.sleep(10)
 
 
 def stage_label(s):
@@ -766,7 +913,7 @@ def cmd_new(a):
 
 
 def cmd_run(a):
-    advance(load(a.id))
+    advance(load(a.id), from_queue=a.queued)
 
 
 def cmd_approve(a):
@@ -870,6 +1017,7 @@ def main():
     p.set_defaults(func=cmd_new)
     p = sub.add_parser("run", help="resume a task")
     p.add_argument("id")
+    p.add_argument("--queued", action="store_true", help=argparse.SUPPRESS)  # queue runner: only if still queued
     p.set_defaults(func=cmd_run)
     p = sub.add_parser("approve", help="pass a gate, or retry after escalation or failure")
     p.add_argument("id")
@@ -886,6 +1034,12 @@ def main():
     p = sub.add_parser("review", help="open the HTML review page for tasks (default: the latest done ones)")
     p.add_argument("ids", nargs="*")
     p.set_defaults(func=cmd_review)
+    p = sub.add_parser("queue", help="start queued (new) tasks as slots and locks free up; the alerts pane does this")
+    p.add_argument("--once", action="store_true", help="one pass, then exit")
+    p.set_defaults(func=cmd_queue)
+    p = sub.add_parser("wait", help="block until a task needs attention or finishes, print it and exit")
+    p.add_argument("--no-block", action="store_true", help="report what changed since the last wait and exit")
+    p.set_defaults(func=cmd_wait)
     p = sub.add_parser("status", help="list tasks, or show one")
     p.add_argument("-r", "--reverse", action="store_true", help="newest task first")
     p.add_argument("id", nargs="?")

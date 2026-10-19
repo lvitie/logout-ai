@@ -7,8 +7,8 @@ from a larger game project; everything project-specific lives in one `team.toml`
 Requirements: Linux or Windows, Python 3.11 or newer (`tomllib`), `claude` and/or `codex` on `PATH`, `git` (or `p4`,
 or another adapter). The dashboard uses Zellij on Linux and Windows Terminal on Windows. Locks use `fcntl` on Linux and `msvcrt` on Windows. The unit tests
 use Linux fakes, so `scripts/validate.sh` runs them on Linux only; Windows CI runs `scripts/test-setup-agent-team.ps1`.
-The dashboard's alerts pane (`notifier`) opens the HTML review page whenever a task needs the user or finishes, and
-notifies through `notify-send` (Linux, `notify`) or a tray balloon (Windows). Nothing here is installed by
+The dashboard's alerts pane (`notifier`) opens the HTML review page whenever a task needs the user or finishes,
+notifies through `notify-send` (Linux, `notify`) or a tray balloon (Windows), and runs the task queue. Nothing here is installed by
 `scripts/install.sh`; use the setup script below. The README has a step-by-step setup guide.
 
 ## Install
@@ -56,6 +56,8 @@ team approve <id> ["note"]        # pass a gate or retry after escalation/failur
 team redo <id> "feedback"         # send back to the implementer (or Producer)
 team drop <id> ["note"]
 team review [id ...]              # build and open the HTML review page (default: the latest done tasks)
+team queue [--once]               # start queued tasks as capacity frees up (the alerts pane does this)
+team wait [--no-block]            # block until a task needs attention or finishes, print it, exit
 team-up                           # dashboard: usage, focus, live log, tasks, alerts, coordinator chat
 team-up "request"                 # same as team new
 ./team.sh                         # install missing dependencies and open the dashboard
@@ -85,6 +87,17 @@ Both dashboards keep usage/focus and the log on the left, with alerts at the top
 On Windows the coordinator runs npm-installed CLIs through their node script rather than the `.cmd` shim, because
 `cmd.exe` re-parses arguments and cuts multi-line prompts. VCS guards become `.cmd` and Git Bash shims under
 `guard-bin/` instead of symlinks.
+
+When `new`, `approve`, `redo` or `run` finds no free slot (`max_parallel`), a busy lock or too little free
+resource, it saves the task as `new` and queued with a `queued: ...` reason (notes and stage kept) and exits 0.
+Every 10 s the alerts pane (or `team queue`) starts queued tasks in `queue.txt` order, then by id, while slots and
+their locks are free; a task whose queue line says `(after t003)` waits until t003 is done. `--no-run` tasks are
+never started by the queue. Queue runs are detached from the dashboard, log to `<task>/logs/queue-run.log` and
+recheck under the task's run lock that it is still queued, so two runners cannot run it twice. `team wait` is how the coordinator chat learns about
+gate, blocked, escalated, failed and done tasks and stale ones (marked running, no process holds the run lock). It
+remembers what it reported in `.wait-seen.json`, so changes between two waits are reported by the next one. The
+first wait reports what needs attention but not tasks that were already done. Claude Code wakes the coordinator
+when its background `team wait` exits; a CLI without that runs `team wait --no-block` at the start of each turn.
 
 `team` finds the config through `--config <path>` (before the subcommand), else `$TEAM_CONFIG`, else the nearest `team.toml` above the current directory. `teamcfg.load` rejects unknown role names anywhere in `[routing]`.
 
@@ -169,8 +182,8 @@ each task waits, and today's finished tasks. A task counts as running only while
 ## State and runtime inputs
 
 Per project, under `state_dir`: `live.log`, `tNNN/` task folders (`state.json`, `.lock-run` held while it runs, hand-offs, `logs/`, `opened.txt`,
-`changes.diff`, `user_opened.txt`, `packet/`), `.lock-*`, `guard-bin/`, `team.kdl`, `review/`. Optional inputs you
-create by hand: `queue.txt` (`tNNN: title` lines), `decisions.md` (shown by `review_page`), `role_override.json`
+`changes.diff`, `user_opened.txt`, `packet/`), `.lock-*`, `.wait-seen.json`, `guard-bin/`, `team.kdl`, `review/`. Optional inputs you
+create by hand: `queue.txt` (`tNNN: title` lines; their order and `(after tNNN)` notes drive the queue), `decisions.md` (shown by `review_page`), `role_override.json`
 (`{"t012": {"review": "director", "implement": "senior", "after_failed_reviews": 1}}`) and the `burst_file`
 (epoch deadline).
 

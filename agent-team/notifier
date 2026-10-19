@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Dashboard "alerts" pane: when a task needs the user (gate, blocked, escalated, failed) or is done, pops a desktop
 notification and opens the HTML review page for it. Tasks already in such a state when it starts are reported once
-(done ones are not). --once checks a single time and exits."""
+(done ones are not). Each pass also runs the queue (`team queue`): queued tasks start as capacity frees up.
+--once checks a single time and exits."""
 import json
 import os
 import shutil
@@ -11,9 +12,11 @@ import time
 
 HERE = os.path.dirname(os.path.realpath(__file__))
 sys.path.insert(0, HERE)
+import team  # noqa: E402
 import teamcfg  # noqa: E402
 
 CFG = teamcfg.load()
+team.init()
 RUNS, NAME, N = CFG["state"], CFG["project"]["name"], CFG["notify"]
 ATTENTION = ("gate", "blocked", "escalated", "failed")
 QUIET = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
@@ -47,6 +50,10 @@ def notify(title, body, urgent):
 
 
 def check(seen, first):
+    try:
+        team.dispatch()
+    except (OSError, ValueError) as e:  # keep alerting when a queue pass fails
+        print(f"queue: {e}", flush=True)
     review = []
     for tid, s in sorted(states().items()):
         status = s.get("status")

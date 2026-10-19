@@ -40,6 +40,9 @@
   Codex rules), `--skip-git-repo-check` for Codex, `team status` skipping folders
   without state, p4 `-b/-L/-v` options and the `integ` synonym, and the richer focus
   pane (run-lock based, so it works on Windows too).
+- [x] Queue busy runs instead of refusing them, start queued tasks from the alerts
+  pane (`team queue`, queue-file order and `after tNNN`), and let the coordinator
+  wait for attention events with `team wait` instead of polling.
 
 ## Next phase: Enforced repository governance
 

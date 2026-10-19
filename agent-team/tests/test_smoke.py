@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -117,6 +118,85 @@ class Project(unittest.TestCase):
             self.assertIn("is running", self.team("drop", "t001", ok=False).stderr)
             self.assertIn("already running", self.team("run", "t001", ok=False).stderr)
         self.team("drop", "t001")
+
+    def state(self, tid):
+        return json.loads((self.proj / f".agent-team/{tid}/state.json").read_text())
+
+    def until_status(self, tid, status):
+        deadline = time.time() + 30
+        while self.state(tid)["status"] != status:
+            self.assertLess(time.time(), deadline, f"{tid} never became {status}: {self.state(tid)}")
+            time.sleep(0.2)
+
+    def test_busy_run_is_queued_and_dispatched(self):
+        self.team("new", "--no-run", "first")
+        self.team("new", "--no-run", "already running")
+        self.set_state("t002", status="running")
+        with (self.proj / ".agent-team/t002/.lock-run").open("a") as run, \
+                (self.proj / ".agent-team/.lock-shared").open("a") as shared:
+            teamcfg.lock(run, blocking=False)  # stand in for the process advancing t002 with the default lock
+            teamcfg.lock(shared, blocking=False)
+            r = self.team("new", "third")
+            self.assertIn("queued: resource 'shared' is busy", r.stdout)
+            self.assertEqual(self.state("t003")["status"], "new")
+            self.set_state("t001", status="gate", reason="Senior Dev: confirm the API")
+            self.team("approve", "t001", "go ahead")
+            s = self.state("t001")
+            self.assertEqual(s["status"], "new")
+            self.assertIn("go ahead", s["notes"][-1])  # the approval survives queueing
+            self.assertEqual(self.team("queue", "--once").stdout, "")  # t002 holds the lock
+        self.set_state("t002", status="done")
+        (self.proj / ".agent-team/queue.txt").write_text("# order\nt001: first (after t003)\n")
+        self.assertIn("started t003", self.team("queue", "--once").stdout)  # t001 waits for t003
+        self.until_status("t003", "failed")  # the fake Producer exits 99
+        self.assertIn("exited 99", self.state("t003")["reason"])
+        self.assertEqual(self.state("t001")["status"], "new")
+        self.set_state("t003", status="done")
+        self.assertIn("started t001", self.team("queue", "--once").stdout)
+        self.until_status("t001", "failed")
+        self.assertIn("queue: starting", (self.proj / ".agent-team/live.log").read_text())
+
+    def test_queue_leaves_deferred_tasks_and_rechecks_claims(self):
+        self.team("new", "--no-run", "start it myself")
+        self.assertEqual(self.team("queue", "--once").stdout, "")  # --no-run waits for `team run`
+        self.set_state("t001", queued=True, status="failed")  # a second runner's stale pick: already ran and failed
+        self.team("run", "--queued", "t001")
+        self.assertEqual((self.state("t001")["status"], self.state("t001")["n"]), ("failed", 0))
+
+    def test_queue_skips_probe_blocked_tasks(self):
+        cfg = self.proj / "team.toml"
+        cfg.write_text(cfg.read_text().replace('names = ["shared"]', 'names = ["shared", "gpu"]')
+                       .replace("# [locks.gpu]", '[locks.gpu]\nmin_free_mib = 100\nprobe_cmd = ["echo", "10"]\n#')
+                       .replace("max_parallel = 3", "max_parallel = 1"))
+        self.team("new", "--no-run", "--res", "gpu", "needs the gpu")
+        self.team("new", "--no-run", "plain")
+        for tid in ("t001", "t002"):
+            self.set_state(tid, queued=True)
+        self.assertIn("started t002", self.team("queue", "--once").stdout)  # t001 must not hold the only slot
+        self.until_status("t002", "failed")
+        self.assertEqual(self.state("t001")["status"], "new")
+
+    def test_wait_reports_each_change_once(self):
+        for request in ("broken", "finished"):
+            self.team("new", "--no-run", request)
+        self.set_state("t001", status="failed", reason="Producer gave ROUTE=None")
+        self.set_state("t002", status="done")
+        first = self.team("wait", "--no-block").stdout
+        self.assertIn("t001 failed: Producer gave ROUTE=None", first)
+        self.assertNotIn("t002", first)  # finished before the first wait: old news
+        self.assertEqual(self.team("wait", "--no-block").stdout, "")
+        self.set_state("t001", status="running", n=1)  # no process holds its run lock
+        self.assertIn("t001 stale: marked running but its process is gone", self.team("wait", "--no-block").stdout)
+        self.set_state("t001", status="failed", n=2)  # failed again after a retry: a new event
+        self.assertIn("t001 failed", self.team("wait", "--no-block").stdout)
+        waiter = subprocess.Popen([sys.executable, "-I", str(ROOT / "team.py"), "wait"], cwd=self.proj, env=self.env,
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.addCleanup(waiter.kill)
+        time.sleep(1)
+        self.assertIsNone(waiter.poll())  # nothing new: it blocks
+        self.set_state("t002", status="gate", reason="Architect: pick a save format", n=3)
+        out, err = waiter.communicate(timeout=30)
+        self.assertEqual((waiter.returncode, out), (0, "t002 gate: Architect: pick a save format\n"), err)
 
     def test_windows_shims(self):
         """npm .cmd shims are bypassed for their node script; guard names get .cmd and sh shims, not symlinks."""

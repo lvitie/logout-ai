@@ -6,7 +6,7 @@ name = "myproject"            # session/notification/chat names
 root = "."                    # workspace root (agents run here)
 state_dir = ".agent-team"     # tasks, live.log, locks, queue; keep out of version control
 docs = ["AGENTS.md", "SPEC.md", "ROADMAP.md", "TASKS.md", "docs/"]  # what the Producer is told to read
-queue_file = "queue.txt"      # optional, relative to state_dir: lines "tNNN: title" shown by focus_tui
+queue_file = "queue.txt"      # optional, relative to state_dir: lines "tNNN: title [(after tNNN)]", queue order
 planning_file = "TASKS.md"    # focus_tui reads its "## Current phase"
 templates_dir = ""            # optional dir (relative to root) with jobs/, roles/, vcs/ overrides
 
