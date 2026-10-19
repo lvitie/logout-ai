@@ -47,6 +47,12 @@
   skill: an interactive interview (Claude and Codex) that proposes
   project-specific agents and writes them after confirmation.
 - [ ] Run `team-setup` interactively from a real Claude and Codex coordinator.
+- [x] Fix the agent-team review findings: atomic guard-bin, race-free task ids,
+  capacity detection from CLI errors only with cycle-safe fallback, retrying the
+  implementation after an escalated review, process-group reaping and signal
+  cleanup, p4 edits on writable files and Codex writers (network, tracked edits),
+  Windows usage probe, queue deps and held/slow alerts, punctuation-tolerant
+  verdicts, run-lock patience, and review page sanitizing.
 
 ## Next phase: Enforced repository governance
 

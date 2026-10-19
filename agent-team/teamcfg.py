@@ -23,7 +23,7 @@ DEFAULTS = {
     "vcs": {"kind": "git", "guard_names": ["git"], "deny": {}, "deny_flags": {}},
     "agents": {"deny_extra": []},
     "locks": {"names": [], "default": []},
-    "routing": {"max_rounds": 2, "max_parallel": 3, "domains": ["code"], "review_extra_domains": [],
+    "routing": {"max_rounds": 2, "max_parallel": 3, "long_stage_min": 120, "domains": ["code"], "review_extra_domains": [],
                 "extra_review_role": "", "extra_review_routes": [], "domain_roles": {},
                 "pipeline": {}, "side_task_reviewer": "architect", "side_task_roles": [],
                 "side_task_domains": {}, "takeover": {}, "after_impl_fails": {}, "capacity_fallback": {},

@@ -132,7 +132,11 @@ details{margin-top:8px}summary{cursor:pointer;color:#ff9a6b}nav a{margin-right:1
             h.append("<div class=g>" + "".join(f"<a href='media/{i}'><img loading=lazy src='media/{i}'></a>" for i in imgs) + "</div>")
         h.append("</div>")
     h.append("""<script src=marked.min.js></script><script>
-document.querySelectorAll('.md').forEach(e=>{const t=JSON.parse(e.dataset.md);if(window.marked)e.innerHTML=marked.parse(t);else{e.textContent=t;e.classList.add('raw')}});</script>""")
+const esc=s=>String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'})[c]);
+if(window.marked)marked.use({renderer:{html(t){return esc(typeof t==='string'?t:t.text)}}});  // agent output: raw HTML shows as text
+document.querySelectorAll('.md').forEach(e=>{const t=JSON.parse(e.dataset.md);if(window.marked){e.innerHTML=marked.parse(t);
+e.querySelectorAll('[href],[src]').forEach(a=>{for(const k of ['href','src'])if(/^(javascript|vbscript):|^data:text\\//i.test((a.getAttribute(k)||'').replace(/[\\s\\x00-\\x1f]/g,'')))a.removeAttribute(k)})}
+else{e.textContent=t;e.classList.add('raw')}});</script>""")
     (OUT / "review.html").write_text("\n".join(h))
     if dec.exists() and dec.read_text().strip():  # standalone decisions page, same styling
         (OUT / "decisions.html").write_text(h[0] + "<h1>Decisions needed</h1><div class=card>" + md(dec.read_text()) + "</div>" + h[-1])

@@ -35,8 +35,9 @@ class Adapter(Vcs):
         return "\n".join(ln for ln in rows if ln.split("|")[0].split()[-1] != str(change))
 
     def prepare_edit(self, path, change):
-        """Open an existing tracked file in the task changelist before an edit. Default-changelist strays join it;
-        files in another numbered changelist are edited in place."""
+        """Open an existing tracked file in the task changelist before an edit, writable or not (allwrite clients,
+        files made writable by hand or by an editor). Default-changelist strays join it; files in another numbered
+        changelist are edited in place; untracked files are left to add."""
         cur = self.run("-F", "%change%", "opened", str(path)).stdout.split()[-1:]  # "not opened" goes to stderr
         cur = cur[0] if cur else ""
         if cur and cur != str(change):
@@ -44,16 +45,24 @@ class Adapter(Vcs):
                 self.run("reopen", "-c", str(change), str(path))
             return True, ""
         if not cur:
-            import os
-            if not os.access(path, os.W_OK):
-                r = self.run("edit", "-c", str(change), str(path))
-                text = r.stdout + r.stderr
-                if r.returncode or "can't edit" in text or "locked" in text:
-                    return False, f"p4 edit failed: {text.strip()}"
+            r = self.run("edit", "-c", str(change), str(path))
+            text = r.stdout + r.stderr
+            if "not on client" in text or "no such file" in text:  # not tracked yet: the post hook adds it
+                return True, ""
+            if r.returncode or "can't edit" in text or "locked" in text:
+                return False, f"p4 edit failed: {text.strip()}"
         return True, ""
 
     def add(self, path, change):
-        self.run("add", "-c", str(change), str(path))
+        r = self.run("add", "-c", str(change), str(path))
+        text = r.stdout + r.stderr
+        if "already opened" in text:  # a tracked file the pre-edit hook opened, or a repeated add
+            return True, ""
+        if "existing file" in text:  # tracked but not opened yet: open it for edit instead
+            return self.prepare_edit(path, change)
+        if r.returncode or any(k in text for k in ("not in client view", "not under client", "can't add", "no permission")):
+            return False, f"p4 add failed: {text.strip()}"
+        return True, ""
 
     def pending_changes(self):
         client = self._client()

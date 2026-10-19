@@ -28,4 +28,7 @@ if sys.argv[1] == "pre":
             print(msg, file=sys.stderr)
             sys.exit(2)
 elif sys.argv[1] == "post" and f.exists():
-    adapter.add(f, change)
+    ok, msg = adapter.add(f, change)
+    if not ok:  # exit 2: Claude sees the message and can fix it
+        print(msg, file=sys.stderr)
+        sys.exit(2)

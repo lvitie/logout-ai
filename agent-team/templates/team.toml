@@ -79,6 +79,7 @@ effort = "high"
 [routing]
 max_rounds = 2                # failed review rounds before escalating to the user
 max_parallel = 3              # concurrent team runs
+long_stage_min = 120          # team wait and the alerts pane flag a stage running longer (0 = never)
 domains = ["code"]            # ROUTE domains the Producer may pick
 review_extra_domains = []     # domains that get one more review ...
 extra_review_routes = ["hard"]  # ... and routes that do

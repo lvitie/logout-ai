@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Dashboard "alerts" pane: when a task needs the user (gate, blocked, escalated, failed) or is done, pops a desktop
-notification and opens the HTML review page for it. Tasks already in such a state when it starts are reported once
-(done ones are not). Each pass also runs the queue (`team queue`): queued tasks start as capacity frees up.
+"""Dashboard "alerts" pane: when a task needs the user (gate, blocked, escalated, failed, stale, slow, held; the
+events of `team wait`) or is done, pops a desktop notification and opens the HTML review page for it. Tasks already in
+such a state when it starts are reported once (done ones are not). Each pass also runs the queue (`team queue`): queued tasks start as capacity frees up.
 --once checks a single time and exits."""
-import json
 import os
 import shutil
 import subprocess
@@ -17,20 +16,8 @@ import teamcfg  # noqa: E402
 
 CFG = teamcfg.load()
 team.init()
-RUNS, NAME, N = CFG["state"], CFG["project"]["name"], CFG["notify"]
-ATTENTION = ("gate", "blocked", "escalated", "failed")
+NAME, N = CFG["project"]["name"], CFG["notify"]
 QUIET = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
-
-
-def states():
-    found = {}
-    for d in RUNS.glob("t[0-9]*"):
-        try:
-            s = json.loads((d / "state.json").read_text())
-            found[s["id"]] = s
-        except (OSError, ValueError, KeyError):  # not a task folder, or mid-write
-            continue
-    return found
 
 
 def notify(title, body, urgent):
@@ -49,30 +36,24 @@ def notify(title, body, urgent):
         subprocess.Popen([os.path.join(HERE, "notify"), title, body, *(["urgent"] if urgent else [])], env=env, **QUIET)
 
 
-def check(seen, first):
+def check(seen):
     try:
         team.dispatch()
     except (OSError, ValueError) as e:  # keep alerting when a queue pass fails
         print(f"queue: {e}", flush=True)
     review = []
-    for tid, s in sorted(states().items()):
-        status = s.get("status")
-        if seen.get(tid) == status:
-            continue
-        seen[tid] = status
-        if status in ATTENTION or (status == "done" and not first):
-            reason = " ".join((s.get("reason") or s.get("title") or "").split())[:180]
-            notify(f"{NAME}: {tid} {status}", reason, status != "done")
-            print(f"\a{time.strftime('%H:%M')} {tid} {status}: {reason}", flush=True)
-            review.append(tid)
+    for tid, status, reason in team.wait_events(seen):
+        notify(f"{NAME}: {tid} {status}", reason[:180], status != "done")
+        print(f"\a{time.strftime('%H:%M')} {tid} {status}: {reason[:180]}", flush=True)
+        review.append(tid)
     if review:  # one page for everything that changed in this pass
         subprocess.run([sys.executable, os.path.join(HERE, "review_page"), *review, "--open"], **QUIET)
 
 
 if __name__ == "__main__":
-    seen = {}
+    seen = team.first_seen()
     print(f"watching {NAME} for tasks that need you", flush=True)
-    check(seen, True)
+    check(seen)
     while "--once" not in sys.argv:
         time.sleep(10)
-        check(seen, False)
+        check(seen)

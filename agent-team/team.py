@@ -6,6 +6,7 @@ import math
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -64,22 +65,37 @@ def ensure_guards():
     _guard_dir().mkdir(parents=True, exist_ok=True)
     if os.name != "nt":
         for name in ("pkill", "killall"):
-            shim = _guard_dir() / name
-            shim.write_text(KILL_SHIM)
-            shim.chmod(0o755)
+            _put(_guard_dir() / name, text=KILL_SHIM, mode=0o755)
     guard = HERE / "bin/vcs-guard"
     for name in CFG["vcs"]["guard_names"]:
         link = _guard_dir() / name
-        if link.is_symlink() or link.exists():
-            link.unlink()
         if os.name != "nt":
-            link.symlink_to(guard)
+            _put(link, target=guard)
             continue
         py = Path(sys.executable)
-        link.write_text(f'#!/bin/sh\nTEAM_GUARD_TOOL={name} exec "{py.as_posix()}" -X utf8 "{guard.as_posix()}" "$@"\n',
-                        newline="\n")
-        (_guard_dir() / f"{name}.cmd").write_text(
-            f'@echo off\nsetlocal\nset "TEAM_GUARD_TOOL={name}"\n"{py}" -X utf8 "{guard}" %*\nexit /b %errorlevel%\n')
+        _put(link, text=f'#!/bin/sh\nTEAM_GUARD_TOOL={name} exec "{py.as_posix()}" -X utf8 "{guard.as_posix()}" "$@"\n',
+             newline="\n")
+        _put(_guard_dir() / f"{name}.cmd",
+             text=f'@echo off\nsetlocal\nset "TEAM_GUARD_TOOL={name}"\n"{py}" -X utf8 "{guard}" %*\nexit /b %errorlevel%\n')
+
+
+def _put(path, text=None, target=None, mode=None, newline=None):
+    """Write a file (text) or symlink (target) unless it is already right, swapping it in atomically: parallel runs
+    share guard-bin, and an agent must never find a guard name missing (it would reach the real tool)."""
+    try:
+        if (os.readlink(path) == str(target)) if target is not None else (path.read_text() == text):
+            return
+    except OSError:  # missing, or not a symlink
+        pass
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp.unlink(missing_ok=True)
+    if target is not None:
+        tmp.symlink_to(target)
+    else:
+        tmp.write_text(text, newline=newline)
+        if mode:
+            tmp.chmod(mode)
+    os.replace(tmp, path)
 
 
 def noun():
@@ -117,7 +133,7 @@ def live(msg, echo=True):
 
 def tag(text, key):
     found = re.findall(rf"^\s*(?:[-*>]\s+)?\**{key}:\**\s*(\S+)[ \t]*(.*)$", text, re.M)
-    return (found[-1][0].strip("*").lower(), found[-1][1].strip()) if found else (None, "")
+    return (found[-1][0].strip("*.,;:!`").lower(), found[-1][1].strip()) if found else (None, "")  # "pass." too
 
 
 def body(text):
@@ -308,21 +324,21 @@ def agent_cmd(cli, model, effort, readonly, out):
         return cmd
     cmd = ["codex", "exec", "-m", model, "-c", f'model_reasoning_effort="{effort}"', "-C", str(WS),
            "--skip-git-repo-check", "--json", "-o", str(out)]  # Perforce and other non-git workspaces
+    if not readonly and CFG["vcs"]["kind"] != "git":  # p4 edit/add must reach the server from the sandbox
+        cmd += ["-c", "sandbox_workspace_write.network_access=true"]
     # workspace-write keeps writes inside the workspace and .git read-only, whatever the user's Codex config says
     return cmd + ["-s", "read-only" if readonly else "workspace-write", "-"]
 
 
 def reap(pid):
-    """Kill an agent's leftover child processes, then the agent, once its result has been delivered."""
+    """Kill what is left of an agent run. On POSIX the agent leads its own session, so its process group also holds
+    background shells that were reparented after it exited; the group id stays reserved while any member lives."""
     if os.name == "nt":
         subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, check=False)
         return
-    # the real pkill, not the guard shim (a team run started from an agent has guard-bin on its PATH)
-    subprocess.run([shutil.which("pkill", path=_clean_path()) or "pkill", "-TERM", "-P", str(pid)], check=False)
-    time.sleep(5)
     try:
-        os.kill(pid, 15)
-    except ProcessLookupError:
+        os.killpg(pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
         pass
 
 
@@ -447,7 +463,7 @@ def claude_low():
     if time.time() - _usage["t"] > 120:
         _usage["t"] = time.time()
         try:
-            out = subprocess.run([str(HERE / "usage_tui"), "--json"], capture_output=True, text=True, timeout=30).stdout
+            out = subprocess.run([sys.executable, str(HERE / "usage_tui"), "--json"], capture_output=True, text=True, timeout=30).stdout
             u = json.loads(out or "{}")
             sc = U["scoped_limit"]  # a model-scoped weekly limit (own window) that diverts one role early
             _usage["scoped_high"] = bool(sc) and u.get(sc["label"], 0) >= sc["threshold"]
@@ -470,21 +486,38 @@ def burst_active():
 def run_agent(s, kind, role):
     role, burst = _select_agent_role(s, kind, role)
     capacity = CFG["routing"]["capacity_fallback"]  # a model reporting 503 / "at capacity" is retried on another role
-    for _ in range(4):
+    tried = [role]
+    while True:
         out, text = _run_agent_once(s, kind, role, selection=(role, burst))
-        reason = s.get("reason", "")
-        if out or s["status"] != "failed" or role not in capacity:
+        if out or s["status"] != "failed" or role not in capacity or not capacity_error(s["reason"].rsplit("see ", 1)[-1]):
             return out, text
-        raw = reason.rsplit("see ", 1)[-1]
-        try:
-            blob = open(raw, errors="ignore").read()
-        except OSError:
-            blob = ""
-        if "at capacity" not in blob and "503" not in blob and "Service Unavailable" not in blob:
+        if capacity[role] in tried:  # a fallback cycle: every role in it is unavailable
+            s["reason"] += f" (capacity: {' -> '.join(tried)} all unavailable)"
             return out, text
         live(f"[{s['id']}] {role} model unavailable (capacity/503): retrying as {capacity[role]}")
         s["status"], s["reason"], role = "running", "", capacity[role]
-    return None, None
+        tried.append(role)
+
+
+def capacity_error(raw):
+    """True when the CLI's own errors in a raw agent log (stderr lines, error/failed/result-error events) say the model
+    is unavailable. Tool output inside other events is ignored: a test log saying "HTTP 503" is not an outage."""
+    try:
+        lines = Path(raw).read_text(errors="ignore").splitlines()
+    except OSError:
+        return False
+    errors = []
+    for ln in lines:
+        try:
+            ev = json.loads(ln)
+        except ValueError:
+            errors.append(ln)
+            continue
+        if isinstance(ev, dict) and (ev.get("type") in ("error", "turn.failed") or
+                                     (ev.get("type") == "result" and ev.get("is_error"))):
+            errors.append(json.dumps(ev))
+    blob = "\n".join(errors[-20:])
+    return any(k in blob for k in ("at capacity", "503", "Service Unavailable", "overloaded"))
 
 
 def _select_agent_role(s, kind, role):
@@ -563,33 +596,75 @@ def _run_agent_once(s, kind, role, *, selection=None):
     cmd = teamcfg.command(agent_cmd(cli, model, effort, kind != "implement", out), path=env["PATH"])
 
     live(f"[{s['id']}] {name} ({model}, {effort}): {kind}")
-    final = None
+    final = timer = None
+    untracked = []  # Codex edits that could not join the task's change
+    session = {} if os.name == "nt" else {"start_new_session": True}  # its own process group, reaped as a whole
     with raw.open("w") as rawf, subprocess.Popen(cmd, cwd=WS, env=env, text=True, stdin=subprocess.PIPE,
-                                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT) as proc:
-        proc.stdin.write(text)
-        proc.stdin.close()
-        for line in proc.stdout:
-            rawf.write(line)
-            rawf.flush()
+                                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT, **session) as proc:
+        try:
             try:
-                msg, result = summarize(cli, json.loads(line))
-            except (json.JSONDecodeError, AttributeError):
-                msg, result = line.strip() or None, None
-            if msg:
-                live(f"[{name}] {msg[:600]}")
-            if result is not None:
-                final = result
-                if cli == "claude":  # result is the last event: reap stray background shells that hold stdout open
-                    threading.Timer(30, reap, (proc.pid,)).start()
-        rc = proc.wait()
+                proc.stdin.write(text)
+                proc.stdin.close()
+            except BrokenPipeError:  # it exited before reading the prompt (crash, auth error): its exit code says so
+                pass
+            for line in proc.stdout:
+                rawf.write(line)
+                rawf.flush()
+                try:
+                    ev = json.loads(line)
+                    msg, result = summarize(cli, ev)
+                except (json.JSONDecodeError, AttributeError):
+                    ev, msg, result = None, line.strip() or None, None
+                if msg:
+                    live(f"[{name}] {msg[:600]}")
+                if result is not None:
+                    final = result
+                if cli == "codex" and kind == "implement" and isinstance(ev, dict):
+                    untracked += track_codex_edits(s, ev)
+                if timer is None and (result is not None or (isinstance(ev, dict) and ev.get("type") == "turn.completed")):
+                    # the last event: reap stray background shells that hold stdout open
+                    timer = threading.Timer(30, reap, (proc.pid,))
+                    timer.daemon = True
+                    timer.start()
+            rc = proc.wait()
+        except BaseException:  # Ctrl+C or a crash: the agent's own session does not get the signal
+            reap(proc.pid)
+            raise
+    if timer:
+        timer.cancel()
+    if os.name != "nt":
+        reap(proc.pid)  # leftovers that do not hold stdout
     if cli == "claude":
         out.write_text(final or "")
     text = out.read_text() if out.exists() else ""
     if rc != 0 or not text.strip():
         s["status"], s["reason"] = "failed", f"{name} exited {rc} with no result; see {raw}"
         return None, None
+    if untracked:  # the change would silently miss these files: the user resolves it (e.g. a lock), then approves
+        s["status"], s["reason"] = "blocked", f"{name} changed files that are not in {noun()} {s['change']}: " + \
+            "; ".join(untracked)[:500]
+        return None, None
     s["history"].append(stem)
     return str(out), text
+
+
+def track_codex_edits(s, ev):
+    """Codex has no edit hook: open or add the files a completed file_change reports in the task's change (p4 edit
+    on an already writable file keeps its content). Deleted files are left to the agent. Returns the failures."""
+    item, failed = ev.get("item", {}), []
+    if ev.get("type") != "item.completed" or item.get("type") != "file_change":
+        return failed
+    for c in item.get("changes", []):
+        path = (WS / c.get("path", "")).resolve()
+        if WS not in path.parents or not path.is_file():
+            continue
+        ok, msg = (True, "") if c.get("kind") == "add" else VCS.prepare_edit(path, s["change"])  # strays move in
+        if ok:  # then add: a no-op for opened files, and it picks up untracked ones (Codex has no post-write hook)
+            ok, msg = VCS.add(path, s["change"])
+        if not ok:
+            live(f"[{s['id']}] {msg}")
+            failed.append(f"{path.relative_to(WS)}: {msg}")
+    return failed
 
 
 def route_task(s):
@@ -703,7 +778,7 @@ def advance(s, from_queue=False):
     res = [r for r in s.get("res") or CFG["locks"]["default"] if r != "none"]
     held = []
     try:
-        f = run_lock(s["id"])  # first: only the lock holder may save the state below
+        f = run_lock(s["id"], patience=1)  # first: only the lock holder may save the state below
         if not f:
             sys.exit(f"{s['id']} is already running.")
         held.append(f)
@@ -745,15 +820,20 @@ def advance(s, from_queue=False):
     live(f"[{s['id']}] {s['status']}: {s['reason']}")
 
 
-def run_lock(tid):
-    """The task's run lock as an open file, held by the process advancing it; None when another process holds it."""
-    f = (task_dir(tid) / ".lock-run").open("a")
-    try:
-        teamcfg.lock(f, blocking=False)
-        return f
-    except BlockingIOError:
-        f.close()
-        return None
+def run_lock(tid, patience=0.0):
+    """The task's run lock as an open file, held by the process advancing it; None when another process holds it.
+    patience retries for that many seconds: status probes (dashboard, wait, queue) hold it for an instant."""
+    deadline = time.time() + patience
+    while True:
+        f = (task_dir(tid) / ".lock-run").open("a")
+        try:
+            teamcfg.lock(f, blocking=False)
+            return f
+        except BlockingIOError:
+            f.close()
+            if time.time() >= deadline:
+                return None
+            time.sleep(0.05)
 
 
 def all_tasks():
@@ -790,6 +870,12 @@ def queue_notes():
     return notes
 
 
+def queue_deps(note):
+    """Task ids in a queue line's "(after t003, t004)" note."""
+    m = re.search(r"\(after ([^)]*)\)", note)
+    return re.findall(r"\bt\d+\b", m[1]) if m else []
+
+
 _spawned = {}  # tid -> Popen of runs this process started, so a run that is still starting is not started twice
 
 
@@ -809,8 +895,7 @@ def dispatch():
                     key=lambda s: (rank.get(s["id"], len(rank)), s["id"])):
         if len(active) >= MAX_PARALLEL:
             break
-        dep = re.search(r"\bafter ([^)]*)", notes.get(s["id"], ""))
-        if dep and any(tasks.get(t, {}).get("status") != "done" for t in re.findall(r"\bt\d+\b", dep[1])):
+        if any(tasks.get(t, {}).get("status") != "done" for t in queue_deps(notes.get(s["id"], ""))):
             continue
         res = {r for r in s.get("res") or CFG["locks"]["default"] if r != "none"}
         if res & busy or resource_low(res):  # a probe-blocked task must not take the slot of a runnable one
@@ -833,36 +918,63 @@ def dispatch():
 ATTENTION = ("gate", "blocked", "escalated", "failed")
 
 
+def first_seen():
+    """Seen map for a new watcher: finished tasks are old news, everything that needs attention gets reported."""
+    return {s["id"]: [s["status"], s.get("n", 0)] for s in all_tasks() if s["status"] in ("done", "dropped")}
+
+
 def wait_events(seen):
-    """[(id, status, text)] for tasks that changed into an attention state, stale (marked running, no process) or
-    done since seen ({id: [status, agent runs]}), which is updated in place."""
-    events = []
-    for s in all_tasks():
-        if s["status"] == "running" and (f := run_lock(s["id"])):
-            with f:  # nobody holds it: reread under the lock, the run may have saved its result since
-                s = load(s["id"])
-            s["status"] = "stale" if s["status"] == "running" else s["status"]
-        st = s["status"]
+    """[(id, status, text)] for tasks that changed since seen ({id: [status, agent runs]}, updated in place) into an
+    attention state, done, stale (marked running, no process), slow (a stage past [routing].long_stage_min) or held
+    (queued after a dropped task)."""
+    events, tasks, notes = [], all_tasks(), queue_notes()
+    by_id = {s["id"]: s for s in tasks}
+    limit = CFG["routing"]["long_stage_min"] * 60
+    for s in tasks:
+        st, text = s["status"], s["reason"] or s["title"] or s["request"].splitlines()[0]
+        if st == "running":
+            f = run_lock(s["id"])
+            if f:
+                with f:  # nobody holds it: reread under the lock, the run may have saved its result since
+                    s = load(s["id"])
+                st, text = s["status"], s["reason"] or text
+                if st == "running":
+                    st, text = "stale", f"marked running but its process is gone; resume with `team run {s['id']}`"
+            elif limit and s.get("stage_started") and time.time() - s["stage_started"] > limit:
+                st = "slow"
+                text = (f"{stage_label(s)} has run {int(time.time() - s['stage_started']) // 60} min; "
+                        f"check the live log")
+        elif st == "new" and s.get("queued"):
+            gone = [t for t in queue_deps(notes.get(s["id"], "")) if by_id.get(t, {}).get("status") == "dropped"]
+            if gone:
+                st = "held"
+                text = (f"queued after {', '.join(gone)}, which was dropped; edit {CFG['project']['queue_file']} "
+                        f"or drop it")
         key = [st, s.get("n", 0)]  # the run count tells a repeated failure from the one already reported
         if seen.get(s["id"]) == key:
             continue
         seen[s["id"]] = key
-        if st in ATTENTION or st in ("stale", "done"):
-            text = (f"marked running but its process is gone; resume with `team run {s['id']}`" if st == "stale"
-                    else s["reason"] or s["title"] or s["request"].splitlines()[0])
+        if st in ATTENTION or st in ("done", "stale", "slow", "held"):
             events.append((s["id"], st, " ".join(text.split())))
     return events
 
 
 def cmd_wait(a):
-    """Block until a task needs attention or finishes, print those tasks and exit. What was reported is kept in
-    <state_dir>/.wait-seen.json, so changes between two waits are reported by the next one."""
+    """Block until a task needs attention or finishes, print those tasks and exit; runs the queue while it waits.
+    What was reported is kept in <state_dir>/.wait-seen.json, so changes between two waits are reported by the next."""
     path = RUNS / ".wait-seen.json"
     try:
         seen = json.loads(path.read_text())
-    except (OSError, ValueError):  # first wait: report what needs attention now, finished tasks are old news
-        seen = {s["id"]: [s["status"], s.get("n", 0)] for s in all_tasks() if s["status"] in ("done", "dropped")}
-    while not (events := wait_events(seen)) and not a.no_block:
+    except (OSError, ValueError):
+        seen = first_seen()
+    while True:
+        try:
+            dispatch()  # queued tasks start without the dashboard too
+        except (OSError, ValueError) as e:
+            print(f"queue: {e}", file=sys.stderr)
+        events = wait_events(seen)
+        if events or a.no_block:
+            break
         time.sleep(5)
     RUNS.mkdir(parents=True, exist_ok=True)
     _atomic_write(path, json.dumps(seen))
@@ -890,12 +1002,18 @@ def stage_label(s):
 def cmd_new(a):
     RUNS.mkdir(parents=True, exist_ok=True)
     n = max([int(p.name[1:]) for p in RUNS.glob("t[0-9]*") if p.name[1:].isdigit()] + [0]) + 1
-    tid = f"t{n:03d}"
+    while True:  # the folder claims the id: two `team new` at once get different ones
+        tid = f"t{n:03d}"
+        try:
+            task_dir(tid).mkdir()
+            break
+        except FileExistsError:
+            n += 1
     try:
         change = VCS.new_change(f"[team {tid}] {a.request.splitlines()[0][:60]}", tid)
     except (RuntimeError, OSError) as e:
+        task_dir(tid).rmdir()
         sys.exit(f"Could not create a change: {e}")
-    task_dir(tid).mkdir()
     names = CFG["locks"]["names"]
     res = [r for r in a.res.split(",") if r in names or r == "none"] if a.res else list(CFG["locks"]["default"])
     res = res or list(CFG["locks"]["default"])
@@ -924,14 +1042,16 @@ def cmd_approve(a):
     if s["status"] == "escalated":
         s["plan_rounds"] = s["review_rounds"] = 0
         stages = pipeline(s["route"], s["domain"])
-        if 0 <= s["stage"] < len(stages) and stages[s["stage"]][0] in ("plan", "plan_review"):
-            s["stage"] = next(i for i, (kind, _) in enumerate(stages) if kind == "plan")
+        kind = stages[s["stage"]][0] if 0 <= s["stage"] < len(stages) else None
+        if kind in ("plan", "plan_review", "review"):  # retry the work that failed review, not the review
+            target = "plan" if kind != "review" else "implement"
+            s["stage"] = next(i for i, (k, _) in enumerate(stages) if k == target)
     advance(s)
 
 
 def cmd_drop(a):
     s = load(a.id)
-    f = run_lock(a.id)
+    f = run_lock(a.id, patience=1)
     if not f:
         sys.exit(f"{a.id} is running; stop it first.")
     f.close()
@@ -1002,6 +1122,9 @@ def cmd_status(a):
 
 
 def main():
+    if os.name != "nt":  # agents run in their own session: a TERM/HUP must unwind like Ctrl+C so they are reaped
+        for sig in (signal.SIGTERM, signal.SIGHUP):
+            signal.signal(sig, lambda n, _frame: sys.exit(128 + n))
     pre = argparse.ArgumentParser(add_help=False)
     pre.add_argument("--config", help="team.toml path (default: $TEAM_CONFIG, else the nearest team.toml upwards)")
     g, rest = pre.parse_known_args()

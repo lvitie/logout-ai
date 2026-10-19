@@ -16,6 +16,9 @@ case "$*" in
   "-F %change% opened "*stray*) echo default ;;
   "-F %change% opened "*other*) echo 42 ;;
   "-F %change% opened "*) echo "$5 - file(s) not opened on this client." >&2 ;;
+  "add -c 7 "*outside*) echo "$4 - file(s) not in client view." >&2; exit 1 ;;
+  "add -c 7 "*opened*) echo "$4 - can't add (already opened for edit)" ;;
+  "add -c 7 "*tracked*) echo "$4 - can't add existing file" ;;
   "-F %depotFile% opened -c 7") printf '//depot/a.txt\n//depot/b.txt\n' ;;
   "-F %change%|%depotFile% opened") printf '7|//depot/a.txt\n42|//depot/c.txt\ndefault|//depot/d.txt\n' ;;
 esac
@@ -42,6 +45,21 @@ class P4Adapter(unittest.TestCase):
         f.chmod(0o444)
         self.assertEqual(self.a.prepare_edit(f, "7"), (True, ""))
         self.assertIn(f"edit -c 7 {f}", self.calls())
+
+    def test_prepare_edit_opens_writable_file(self):
+        f = self.d / "allwrite.txt"  # allwrite clients, or a file made writable by an editor
+        f.write_text("x")
+        self.assertEqual(self.a.prepare_edit(f, "7"), (True, ""))
+        self.assertIn(f"edit -c 7 {f}", self.calls())
+
+    def test_add_reports_failures(self):
+        self.assertEqual(self.a.add(self.d / "new.txt", "7"), (True, ""))
+        ok, msg = self.a.add(self.d / "outside.txt", "7")
+        self.assertFalse(ok)
+        self.assertIn("not in client view", msg)
+        self.assertEqual(self.a.add(self.d / "opened.txt", "7"), (True, ""))  # Write on a file the pre-hook opened
+        self.assertEqual(self.a.add(self.d / "tracked.txt", "7"), (True, ""))
+        self.assertIn(f"edit -c 7 {self.d / 'tracked.txt'}", self.calls())
 
     def test_prepare_edit_reopens_default_and_skips_other(self):
         self.a.prepare_edit(self.d / "stray.txt", "7")

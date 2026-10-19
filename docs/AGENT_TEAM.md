@@ -90,11 +90,14 @@ On Windows the coordinator runs npm-installed CLIs through their node script rat
 
 When `new`, `approve`, `redo` or `run` finds no free slot (`max_parallel`), a busy lock or too little free
 resource, it saves the task as `new` and queued with a `queued: ...` reason (notes and stage kept) and exits 0.
-Every 10 s the alerts pane (or `team queue`) starts queued tasks in `queue.txt` order, then by id, while slots and
-their locks are free; a task whose queue line says `(after t003)` waits until t003 is done. `--no-run` tasks are
+Every 10 s the alerts pane, a waiting `team wait` (every 5 s) or `team queue` starts queued tasks in `queue.txt` order, then by id, while slots and
+their locks are free and the lock probes pass; a task whose queue line says `(after t003)` waits until t003 is done
+(and is reported as held if t003 is dropped). `--no-run` tasks are
 never started by the queue. Queue runs are detached from the dashboard, log to `<task>/logs/queue-run.log` and
 recheck under the task's run lock that it is still queued, so two runners cannot run it twice. `team wait` is how the coordinator chat learns about
-gate, blocked, escalated, failed and done tasks and stale ones (marked running, no process holds the run lock). It
+gate, blocked, escalated, failed and done tasks, stale ones (marked running, no process holds the run lock), slow
+ones (a stage running longer than `[routing].long_stage_min`, 120 by default, 0 = never) and held ones; the alerts
+pane notifies on the same events. It
 remembers what it reported in `.wait-seen.json`, so changes between two waits are reported by the next one. The
 first wait reports what needs attention but not tasks that were already done. Claude Code wakes the coordinator
 when its background `team wait` exits; a CLI without that runs `team wait --no-block` at the start of each turn.
@@ -143,7 +146,7 @@ writes `team.toml` and `<templates_dir>/roles/*.md` only after you confirm.
   `director` are required; others are free.
 - `[routing]`: `pipeline.simple|complex|hard` (stage kind + role lists), `domains`, `review_extra_domains`,
   `extra_review_routes`, `extra_review_role`, `domain_roles`, `side_task_*`, `takeover.<role>`,
-  `after_impl_fails`, `capacity_fallback`, `max_rounds`, `max_parallel`.
+  `after_impl_fails`, `capacity_fallback`, `max_rounds`, `max_parallel`, `long_stage_min`.
 - `[routing.usage]`: optional Claude/Codex plan balancing (`enabled = false` by default): `claude_fallback`,
   `limits`, `scoped_limit`, `surplus_swap`, `burst_swap`, `burst_file`, `cheap_first`, `no_burst_effort`,
   `escalation_gate`. Needs both CLIs and `usage_tui` data.
@@ -156,7 +159,7 @@ Prompt templates use `{project}`, `{change_noun}`, `{domains}`, `{docs}` and `{s
 
 A change is a string id. Interface: `new_change(desc, hint)`, `set_description(change, desc)`,
 `opened(change)`, `opened_files(change)`, `diff(change)`, `others_opened(change)`,
-`prepare_edit(path, change) -> (ok, msg)`, `add(path, change)`, `pending_changes()`, `changed_files(change)`.
+`prepare_edit(path, change) -> (ok, msg)`, `add(path, change) -> (ok, msg)`, `pending_changes()`, `changed_files(change)`.
 Adapters never submit, commit, stage, revert or shelve.
 
 - git: change id = task id, the description lives in task state only, all tasks share the working tree,
@@ -171,13 +174,21 @@ non-guard match on `PATH`). It refuses `[vcs.deny]` subcommands and `[vcs.deny_f
 Codex agents, including when reached through a git alias (`-c alias.x=...` or configured), and refuses git shell
 aliases (`!...`). The guard is a guardrail against accidental commits, not a security boundary: an agent can still
 run the real binary by absolute path. The hard limit for Codex writers is its `workspace-write` sandbox, which keeps
-`.git` read-only (network access follows `[sandbox_workspace_write]` in the Codex config, off by default); Claude agents get the same subcommands as `Bash(...)` deny rules.
+`.git` read-only (network access follows `[sandbox_workspace_write]` in the Codex config, off by default, except for
+writers when `[vcs].kind` is not git: `p4 edit`/`add` must reach the server); Claude agents get the same subcommands as
+`Bash(...)` deny rules. Codex has no edit hook, so the files its `file_change` events report are opened (`prepare_edit`)
+or added in the task's change as they arrive; a file that cannot be opened (e.g. locked elsewhere) blocks the task
+with the file named, and deletions are left to the agent.
 Codex runs with `--skip-git-repo-check`, so Perforce and other non-git workspaces work.
 
 Agents may kill only a PID they started and recorded: killing by name once took down the user's dashboard.
 `guard-bin/` holds refusing `pkill` and `killall` shims (POSIX), `hooks/bash_guard.py` denies Claude Bash commands
 that kill by name or pattern (`pgrep ... | xargs kill`, `kill $(pidof x)`, `taskkill /IM`, `Stop-Process -Name`) or
-signal PID <= 0 or a process group, and `codex-home/rules/default.rules` forbids the simple forms for Codex.
+signal PID <= 0 or a process group, and `codex-home/rules/default.rules` forbids the simple forms for Codex. The team
+itself starts each agent in its own session (POSIX) and kills that process group after the run, so background shells an
+agent left behind cannot hold the run open. A model counts as at capacity only when the CLI's own errors (stderr,
+`error`/`turn.failed`/error `result` events) say 503, at capacity, Service Unavailable or overloaded; a fallback cycle in
+`capacity_fallback` stops after each role was tried once.
 
 The focus pane shows the planning focus, running tasks (stage, planned and actual role, model and effort, round,
 elapsed time, the agent's last line), lock holders, what needs you (gates, blocked, escalated, failed and corrupt

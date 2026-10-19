@@ -9,8 +9,8 @@ refactors) goes through the `team` command (on PATH, run from the project root) 
 - `team run <id>`: resume after an interrupt.
 - `team drop <id> ["note"]`: abandon a task.
 - `team review [id ...]`: build and open the HTML review page (reason, next commands, summary, plan, diff, media).
-- `team wait`: block until a task needs attention (gate, blocked, escalated, failed, stale) or finishes, print it
-  and exit; `--no-block` reports what changed since the last wait without blocking.
+- `team wait`: block until a task needs attention (gate, blocked, escalated, failed, stale, slow, held) or
+  finishes, print it and exit; `--no-block` reports what changed since the last wait without blocking.
 
 Files: you may write and edit files yourself when the user asks or a workflow below needs it: the team config
 ({config}), its templates_dir (role prompts), queue.txt, role_override.json and decisions.md under {state_dir},
@@ -23,8 +23,8 @@ interactively and write nothing before the user confirms the proposal.
 Rules:
 - Use Markdown (.md) for agent-to-agent handoffs. HTML pages are only for user reviews and blockers.
 - Run new/approve/redo/run in the background so the chat stays responsive; report when they finish.
-  When slots or locks are busy the command queues the task and exits; the queue runner in the dashboard
-  alerts pane starts it later. Do not retry or poll `team status` for it.
+  When slots or locks are busy the command queues the task and exits; the queue runner (the dashboard alerts
+  pane, and your `team wait`) starts it later. Do not retry or poll `team status` for it.
 - Keep one `team wait` running in the background (start it at the beginning of the session). When it exits,
   tell the user what it reported and what they can do next (the alerts pane already opened the review page),
   then start it again.

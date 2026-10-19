@@ -198,6 +198,129 @@ class Project(unittest.TestCase):
         out, err = waiter.communicate(timeout=30)
         self.assertEqual((waiter.returncode, out), (0, "t002 gate: Architect: pick a save format\n"), err)
 
+    def test_wait_flags_slow_and_held_tasks(self):
+        for request in ("long", "base", "follow-up"):
+            self.team("new", "--no-run", request)
+        self.team("wait", "--no-block")
+        self.set_state("t001", status="running", stage_started=time.time() - 3 * 3600, route="simple", stage=0)
+        self.set_state("t002", status="dropped")
+        self.set_state("t003", queued=True)
+        (self.proj / ".agent-team/queue.txt").write_text("t003: follow-up (after t002)\n")
+        with (self.proj / ".agent-team/t001/.lock-run").open("a") as run:
+            teamcfg.lock(run, blocking=False)  # alive, just slow
+            out = self.team("wait", "--no-block").stdout
+        self.assertIn("t001 slow: implement/mid has run 180 min", out)
+        self.assertIn("t003 held: queued after t002, which was dropped", out)
+        self.assertEqual(self.state("t003")["status"], "new")  # never started
+
+    def fake_claude(self, body):
+        (self.fake / "claude").write_text("#!/bin/sh\n" + body)
+
+    def test_capacity_fallback_cycle_stops(self):
+        cfg = self.proj / "team.toml"
+        cfg.write_text(cfg.read_text().replace("capacity_fallback = {}", 'capacity_fallback = {producer = "mid", mid = "producer"}'))
+        self.fake_claude("echo '503 Service Unavailable' >&2\nexit 1\n")
+        self.team("new", "outage")  # must end: producer -> mid -> producer is a cycle
+        s = self.state("t001")
+        self.assertEqual((s["status"], s["n"]), ("failed", 2))
+        self.assertIn("producer -> mid all unavailable", s["reason"])
+
+    def test_agent_exiting_before_reading_the_prompt_fails_the_task(self):
+        self.fake_claude("exec 0<&-\nexit 3\n")  # closes stdin at once: the prompt write hits a broken pipe
+        self.team("new", "x " * 50000)  # larger than a pipe buffer, below the argv limit
+        s = self.state("t001")
+        self.assertEqual(s["status"], "failed")
+        self.assertIn("exited 3", s["reason"])
+
+    def test_capacity_error_reads_only_cli_errors(self):
+        import team
+        raw = Path(self.tmp.name) / "raw.jsonl"
+        tool = {"type": "assistant", "message": {"content": [{"type": "text", "text": "tests: HTTP 503 at line 503"}]}}
+        raw.write_text(json.dumps(tool) + "\n")
+        self.assertFalse(team.capacity_error(raw))
+        raw.write_text(json.dumps(tool) + '\n{"type": "result", "is_error": true, "result": "API Error: 529 overloaded"}\n')
+        self.assertTrue(team.capacity_error(raw))
+        raw.write_text("Error: 503 Service Unavailable\n")
+        self.assertTrue(team.capacity_error(raw))
+
+    def test_verdict_tolerates_punctuation(self):
+        import team
+        self.assertEqual(team.tag("notes\nVERDICT: **pass**.\n", "VERDICT")[0], "pass")
+        self.assertEqual(team.tag("STATUS: done.", "STATUS")[0], "done")
+        self.assertEqual(team.queue_deps("t009: hud (after t007, t008) unlike t002"), ["t007", "t008"])
+
+    def test_approve_escalated_review_retries_the_implementation(self):
+        self.team("new", "--no-run", "x")
+        self.set_state("t001", route="simple", domain="code", stage=1, status="escalated", review_rounds=3,
+                       reason="implement failed review 3 times")
+        self.team("approve", "t001", "try again")
+        self.assertTrue((self.proj / ".agent-team/t001/logs/01-implement-mid.prompt.md").exists())
+
+    def test_agent_leftovers_are_reaped(self):
+        pidfile = Path(self.tmp.name) / "bg.pid"
+        self.fake_claude(f"sleep 300 >/dev/null 2>&1 &\necho $! > {pidfile}\n"
+                         "echo '{\"type\": \"result\", \"result\": \"no tags\"}'\n")
+        self.team("new", "leftover")
+        pid = int(pidfile.read_text())
+        deadline = time.time() + 10
+        while Path(f"/proc/{pid}").exists() and Path(f"/proc/{pid}/stat").read_text().split(") ")[1][0] != "Z":
+            self.assertLess(time.time(), deadline, "background sleep survived the agent run")
+            time.sleep(0.1)
+
+    def test_terminating_a_run_stops_its_agent(self):
+        pidfile = Path(self.tmp.name) / "agent.pid"
+        self.fake_claude(f"echo $$ > {pidfile}\nexec sleep 300\n")
+        run = subprocess.Popen([sys.executable, "-I", str(ROOT / "team.py"), "new", "slow"], cwd=self.proj, env=self.env,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.addCleanup(run.kill)
+        deadline = time.time() + 20
+        while not pidfile.exists() or not pidfile.read_text().strip():
+            self.assertLess(time.time(), deadline, "the agent never started")
+            time.sleep(0.1)
+        pid = int(pidfile.read_text())
+        run.terminate()  # e.g. `timeout`, or the pane that started it closing
+        run.wait(timeout=20)
+        deadline = time.time() + 10
+        while Path(f"/proc/{pid}").exists() and Path(f"/proc/{pid}/stat").read_text().split(") ")[1][0] != "Z":
+            self.assertLess(time.time(), deadline, "the agent outlived its team run")
+            time.sleep(0.1)
+        with (self.proj / ".agent-team/t001/.lock-run").open("a") as f:
+            teamcfg.lock(f, blocking=False)  # released: raises BlockingIOError if the dead run still held it
+
+    def test_new_skips_an_id_claimed_meanwhile(self):
+        from types import SimpleNamespace
+        from unittest import mock
+        import team
+        team.init(self.proj / "team.toml")
+        (self.proj / ".agent-team/t001").mkdir(parents=True)  # another `team new` claimed t001 after our listing
+        with mock.patch.object(Path, "glob", return_value=[]), mock.patch("os.environ", self.env):
+            team.cmd_new(SimpleNamespace(request="second", res="", role=None, no_run=True))
+        self.assertEqual(self.state("t002")["request"], "second")
+        self.assertFalse((self.proj / ".agent-team/t001/state.json").exists())
+
+    def test_guards_are_rewritten_in_place(self):
+        import team
+        team.init(self.proj / "team.toml")
+        team.ensure_guards()
+        guard = self.proj / ".agent-team/guard-bin"
+        before = (guard / "git").lstat().st_ino
+        team.ensure_guards()  # already right: untouched, so a parallel run never finds it missing
+        self.assertEqual((guard / "git").lstat().st_ino, before)
+        self.assertEqual(os.readlink(guard / "git"), str(ROOT / "bin/vcs-guard"))
+        self.assertEqual([p.name for p in guard.iterdir() if p.name.startswith(".")], [])
+
+    def test_run_lock_waits_out_a_probe(self):
+        import threading
+        import team
+        team.init(self.proj / "team.toml")
+        self.team("new", "--no-run", "x")
+        probe = (self.proj / ".agent-team/t001/.lock-run").open("a")
+        teamcfg.lock(probe, blocking=False)
+        threading.Timer(0.3, probe.close).start()
+        f = team.run_lock("t001", patience=2)
+        self.assertIsNotNone(f)
+        f.close()
+
     def test_windows_shims(self):
         """npm .cmd shims are bypassed for their node script; guard names get .cmd and sh shims, not symlinks."""
         from types import SimpleNamespace
@@ -222,7 +345,8 @@ class Project(unittest.TestCase):
 
         import team
         team.init(self.proj / "team.toml")
-        with mock.patch.object(team, "os", nt):
+        nt_files = SimpleNamespace(name="nt", getpid=os.getpid, readlink=os.readlink, replace=os.replace)
+        with mock.patch.object(team, "os", nt_files):  # ensure_guards swaps files in atomically
             team.ensure_guards()
         guard = self.proj / ".agent-team/guard-bin"
         self.assertFalse((guard / "git").is_symlink())

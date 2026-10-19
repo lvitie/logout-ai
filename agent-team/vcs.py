@@ -2,7 +2,7 @@
 
 Interface (all adapters): new_change(desc, hint) -> str, set_description(change, desc), opened(change) -> str,
 opened_files(change) -> [path], diff(change) -> str, others_opened(change) -> str, prepare_edit(path, change) -> (ok, msg),
-add(path, change), pending_changes() -> [str], changed_files(change) -> [abs path].
+add(path, change) -> (ok, msg), pending_changes() -> [str], changed_files(change) -> [abs path].
 The adapters never submit, commit, stage, revert or shelve."""
 import importlib
 import subprocess
@@ -53,7 +53,7 @@ class Vcs:
         return True, ""
 
     def add(self, path, change):
-        pass
+        return True, ""
 
     def pending_changes(self):
         return []
