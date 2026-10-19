@@ -64,7 +64,9 @@ requirements and instructions.
 ### Reusable workflows
 
 - **REQ-WORKFLOW-01:** Provide project-planning templates and keep planning
-  separate from pull-request readiness.
+  separate from pull-request readiness. Local review uses the built-in
+  `codex review --uncommitted` loop, with validation and review repeated after
+  each actionable fix.
 - **REQ-WORKFLOW-02:** Provide focused skills for the recurring domains listed
   under [Users and environments](#users-and-environments), including
   Codex-native Graphify and live Unreal Editor workflows.
@@ -134,8 +136,8 @@ plugin state, and runtime databases remain outside repository ownership.
 - Installing Codex or Claude Code through the baseline installer or project
   seeding. The explicitly invoked agent-team `team.sh` and `team.ps1` launchers
   may install missing configured CLIs and dashboard dependencies.
-- Installing CodeRabbit, RTK, local model servers, Graphify, or the Unreal MCP
-  server.
+- Installing third-party review CLIs, RTK, local model servers, Graphify, or the
+  Unreal MCP server.
 - Installing project dependencies or initializing version control as part of
   project seeding.
 - Adding security scanners that do not support the repository's languages.
@@ -155,7 +157,9 @@ plugin state, and runtime databases remain outside repository ownership.
 - **AC-06:** Pull requests and default-branch pushes run the platform validation
   matrix; pull requests also run dependency review.
 - **AC-07:** Workflow documentation covers planning, implementation, review,
-  manual testing, and merge gates.
+  manual testing, and merge gates. The pull-request readiness workflow
+  requires a clean Codex review loop and does not depend on a third-party
+  review service.
 - **AC-08:** Hosted repository settings match `REQ-GOVERN-01` and
   `REQ-GOVERN-02`, with any unavailable independent-approval requirement
   documented.

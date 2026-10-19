@@ -79,6 +79,7 @@ implementation, review, manual-testing, and merge workflow.
 - Add Dependabot coverage, dependency review, and pull-request evidence
   prompts.
 - Align Claude routing and workflow documentation.
+- Use the built-in Codex review loop for local pull-request readiness checks.
 - Add explicit, cross-platform installation for selected Codex plugins.
 - Render exact trust entries for every Git worktree beneath the configured
   project directory.
