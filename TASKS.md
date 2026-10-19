@@ -29,8 +29,12 @@
   Linux with 46 unit tests (one pre-existing launcher test needs node/npm on PATH),
   setup integration, full validation with ShellCheck and pwsh parsing, a real Zellij
   session from the new layout, and the PowerShell setup run under pwsh on Linux.
-- [ ] Run `scripts/test-setup-agent-team.ps1` on Windows CI and `team.ps1` on a real
-  Windows machine.
+- [x] Run `scripts/test-setup-agent-team.ps1` and `team.ps1` on a real Windows
+  machine. Use native Windows Terminal consoles instead of native Zellij;
+  visually verify resizing and alerts above tasks and the coordinator on the
+  right. Local validation passed: 61 Python tests, Linux and native Windows
+  setup integration, and `scripts/validate.sh` (25 skills).
+- [ ] Verify the Windows setup integration test on Windows CI.
 - [x] Ask for git or p4 during setup (`--vcs`/`-Vcs`, detected without a terminal).
 - [x] Port the Inferno fixes: no killing by name (PATH shims, Claude Bash hook,
   Codex rules), `--skip-git-repo-check` for Codex, `team status` skipping folders

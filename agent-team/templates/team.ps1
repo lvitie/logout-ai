@@ -8,9 +8,6 @@ $env:TEAM_CONFIG = Join-Path $projectRoot 'team.toml'
 $defaultLogoutRoot = '@@LOGOUT_AI_ROOT@@'
 $logoutRoot = if ($env:LOGOUT_AI_ROOT) { $env:LOGOUT_AI_ROOT } else { $defaultLogoutRoot }
 $userBin = Join-Path $HOME '.local/bin'
-# Official Zellij v0.45.1 x86_64 Windows release asset SHA-256 digest, pinned at implementation.
-$zellijUrl = 'https://github.com/zellij-org/zellij/releases/download/v0.45.1/zellij-x86_64-pc-windows-msvc.zip'
-$zellijSha256 = 'b854e7b223e67d0705c5f685ef50541c38a57981b13624d09c92bed419b6f80d'
 
 function Fail {
     param([string] $Message)
@@ -76,7 +73,7 @@ if (-not (Test-Path -LiteralPath $env:TEAM_CONFIG -PathType Leaf)) {
 if (-not (Test-Path -LiteralPath (Join-Path $logoutRoot 'agent-team/bin/team-up') -PathType Leaf)) {
     Fail 'Logout AI checkout missing. Set LOGOUT_AI_ROOT to its location.'
 }
-$env:Path = $userBin + [System.IO.Path]::PathSeparator + $env:Path
+Update-SessionPath
 
 $python = Find-Python
 if (-not $python) {
@@ -95,27 +92,8 @@ if ($LASTEXITCODE -ne 0) {
     Fail 'Git is not working.'
 }
 
-if (-not (Test-OnPath 'zellij')) {
-    if ($env:PROCESSOR_ARCHITECTURE -notin @('AMD64', 'ARM64')) {
-        Fail 'Automatic Zellij installation supports x64 Windows (ARM64 runs it under emulation).'
-    }
-    $temporary = Join-Path ([System.IO.Path]::GetTempPath()) "agent-team-zellij-$([guid]::NewGuid())"
-    New-Item -ItemType Directory -Path $temporary | Out-Null
-    try {
-        Write-Output 'Installing Zellij 0.45.1 from its verified upstream release for this user.'
-        $archive = Join-Path $temporary 'zellij.zip'
-        Invoke-WebRequest -Uri $zellijUrl -OutFile $archive -UseBasicParsing -TimeoutSec 180
-        $actual = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
-        if ($actual -ne $zellijSha256) {
-            Fail "Zellij download checksum mismatch ($actual)."
-        }
-        Expand-Archive -LiteralPath $archive -DestinationPath $temporary
-        New-Item -ItemType Directory -Path $userBin -Force | Out-Null
-        Copy-Item -LiteralPath (Join-Path $temporary 'zellij.exe') -Destination (Join-Path $userBin 'zellij.exe')
-    }
-    finally {
-        Remove-Item -LiteralPath $temporary -Recurse -Force -ErrorAction SilentlyContinue
-    }
+if (-not (Test-OnPath 'wt.exe')) {
+    Install-WingetPackage 'Microsoft.WindowsTerminal'
 }
 
 $readClis = 'import sys; sys.path.insert(0, sys.argv[1]); import teamcfg; ' +
@@ -147,7 +125,7 @@ foreach ($cli in $agentClis) {
     }
 }
 
-foreach ($dependency in @('git', 'zellij')) {
+foreach ($dependency in @('git', 'wt.exe')) {
     if (-not (Test-OnPath $dependency)) {
         Fail "Installation did not provide $dependency on PATH."
     }

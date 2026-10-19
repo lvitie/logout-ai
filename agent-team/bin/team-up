@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Agent team dashboard for the project that owns team.toml (found via $TEAM_CONFIG or the current directory upwards).
-No args: open or reattach the zellij session. With a request: start a task.
+No args: open the native dashboard (Windows Terminal on Windows, Zellij on Linux).
+With a request: start a task.
   team-up
   team-up "add a stamina bar to the HUD"
 """
@@ -31,6 +32,12 @@ cfg["state"].mkdir(parents=True, exist_ok=True)
 
 if sys.argv[1:]:
     run([sys.executable, str(here / "team.py"), "new", " ".join(sys.argv[1:])])
+if os.name == "nt":
+    import windows_dashboard
+    terminal = windows_dashboard.terminal_executable()
+    if not terminal:
+        sys.exit("team-up: Windows Terminal is not on PATH; run team.ps1 to install it")
+    run(windows_dashboard.command(cfg, terminal, sys.executable))
 if not shutil.which("zellij"):
     sys.exit("team-up: zellij is not on PATH")
 session = f"{cfg['project']['name']}-team"

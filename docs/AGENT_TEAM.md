@@ -5,7 +5,7 @@ task, then plan / implement / review stages run one agent at a time per task, wi
 from a larger game project; everything project-specific lives in one `team.toml` plus optional templates.
 
 Requirements: Linux or Windows, Python 3.11 or newer (`tomllib`), `claude` and/or `codex` on `PATH`, `git` (or `p4`,
-or another adapter). `zellij` for the dashboard. Locks use `fcntl` on Linux and `msvcrt` on Windows. The unit tests
+or another adapter). The dashboard uses Zellij on Linux and Windows Terminal on Windows. Locks use `fcntl` on Linux and `msvcrt` on Windows. The unit tests
 use Linux fakes, so `scripts/validate.sh` runs them on Linux only; Windows CI runs `scripts/test-setup-agent-team.ps1`.
 The dashboard's alerts pane (`notifier`) opens the HTML review page whenever a task needs the user or finishes, and
 notifies through `notify-send` (Linux, `notify`) or a tray balloon (Windows). Nothing here is installed by
@@ -56,7 +56,7 @@ team approve <id> ["note"]        # pass a gate or retry after escalation/failur
 team redo <id> "feedback"         # send back to the implementer (or Producer)
 team drop <id> ["note"]
 team review [id ...]              # build and open the HTML review page (default: the latest done tasks)
-team-up                           # zellij dashboard: usage, focus, live log, tasks, alerts, coordinator chat
+team-up                           # dashboard: usage, focus, live log, tasks, alerts, coordinator chat
 team-up "request"                 # same as team new
 ./team.sh                         # install missing dependencies and open the dashboard
 .\team.ps1                        # the same on Windows
@@ -75,9 +75,13 @@ The launcher records the Logout AI checkout location; set `LOGOUT_AI_ROOT` if
 that checkout moves. CLI sign-in remains interactive and is never copied.
 The dashboard coordinator uses the Producer's configured CLI, model and effort.
 
-`team.ps1` is the Windows counterpart. It installs missing Python 3.13, Git for Windows and Node.js LTS with
-`winget`, Zellij 0.45.1 (`zellij-x86_64-pc-windows-msvc.zip`, pinned SHA-256) into `~/.local/bin`, and missing agent
-CLIs with `npm install --global`, then refreshes `PATH` for the session and runs `team-up` with UTF-8 mode on.
+`team.ps1` is the Windows counterpart. It installs missing Python 3.13, Git for Windows, Node.js LTS and Windows
+Terminal with `winget`, and missing agent CLIs with `npm install --global`. It refreshes `PATH` before detecting
+dependencies and runs `team-up` with UTF-8 mode on. Each launch opens a fresh Windows Terminal window with native
+console panes, so the coordinator has working terminal input and all panes resize with the window. The installed
+Terminal executable is resolved from its package when `wt.exe` is an app-execution alias. Pane startup binds the
+project explicitly and refreshes PATH, including when Terminal was already running before dependencies installed.
+Both dashboards keep usage/focus and the log on the left, with alerts at the top right, then tasks and coordinator.
 On Windows the coordinator runs npm-installed CLIs through their node script rather than the `.cmd` shim, because
 `cmd.exe` re-parses arguments and cuts multi-line prompts. VCS guards become `.cmd` and Git Bash shims under
 `guard-bin/` instead of symlinks.
@@ -90,6 +94,7 @@ On Windows the coordinator runs npm-installed CLIs through their node script rat
 | --- | --- |
 | `agent-team/team.py` | orchestrator (pipeline, role selection, locks, task state) |
 | `agent-team/teamcfg.py` | `team.toml` loader, XDG/agent-home helpers, template lookup |
+| `agent-team/windows_dashboard.py` | native Windows Terminal layout and project-bound console panes |
 | `agent-team/vcs.py`, `vcs_p4.py` | VCS adapter interface, git adapter, Perforce adapter |
 | `agent-team/bin/` | `team`, `team-up` (Python, both platforms), `vcs-guard` |
 | `agent-team/write_config.py` | writes a new `team.toml` from the agent and VCS presets (used by both setup scripts) |

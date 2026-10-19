@@ -60,7 +60,7 @@ try {
     $helpOutput = (& (Join-Path $project 'team.ps1') --help) -join "`n"
     Assert-Condition ($helpOutput -match 'Missing dependencies') 'Launcher help failed'
     $config = [System.IO.File]::ReadAllText((Join-Path $project 'team.toml'))
-    Assert-Condition ($config -match '(?m)^name = "My-Project"\r?$') 'Project name was not substituted'
+    Assert-Condition ($config -match '(?m)^name = "My-Project"[ \t]*(?:#[^\r\n]*)?\r?$') 'Project name was not substituted'
     Assert-Condition ($config -notmatch 'cli = "claude"') 'codex preset still uses claude'
 
     $second = (& $setup $project -BinDir $bin -Agents codex) -join "`n"

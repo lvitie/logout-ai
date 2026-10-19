@@ -282,16 +282,16 @@ cd C:\path\to\project
 
 On Fedora or Debian/Ubuntu, `team.sh` installs missing packages with
 `dnf`/`apt-get`. On Windows, `team.ps1` installs Python, Git, and Node.js with
-`winget`. Both install Zellij 0.45.1 into `~/.local/bin` from its upstream
-release, verified against a pinned SHA-256, and install missing agent CLIs with
-npm. If PowerShell refuses to run local scripts, allow them for your user with
+`winget`, including Windows Terminal for the native dashboard. Linux uses
+Zellij 0.45.1 from its upstream release, verified against a pinned SHA-256.
+Both install missing agent CLIs with npm. If PowerShell refuses to run local scripts, allow them for your user with
 `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`.
 
 ### 5. Work with the team
 
-The Zellij dashboard shows usage, focus, the live log, the task list, and an
+The dashboard (Zellij on Linux, native Windows Terminal panes on Windows) shows usage, focus, the live log, the task list, and an
 alerts pane, and has a coordinator chat where you can ask for work in plain
-language. When a task needs you (a gate, a question, a failure) or finishes,
+language. Alerts sit at the top right, above tasks and the coordinator. When a task needs you (a gate, a question, a failure) or finishes,
 the alerts pane sends a desktop notification and opens an HTML review page with
 the reason, the commands for the next step, the summary, plan, diff, and media.
 The same actions are available as commands from the project directory:

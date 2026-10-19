@@ -71,6 +71,7 @@ required_files=(
   "scripts/test-setup-project.ps1"
   "scripts/test-setup-project.sh"
   "agent-team/teamcfg.py"
+  "agent-team/windows_dashboard.py"
   "agent-team/team.py"
   "agent-team/vcs.py"
   "agent-team/vcs_p4.py"
