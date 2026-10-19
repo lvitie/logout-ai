@@ -355,9 +355,9 @@ The reusable workflow separates planning from pull-request readiness:
   reviewable phase at a time.
 - `$project-bootstrap` seeds those files additively, selects stack-specific
   skills, and authors missing project-local skill coverage when necessary.
-- `$pr-readiness` validates the final diff, runs `codex review --uncommitted`
-  until no actionable findings remain, records manual testing, and verifies CI
-  and review state before merge.
+- `$pr-readiness` validates the final diff and selects built-in Codex review
+  for uncommitted work, the actual target branch, or a commit. It resolves
+  actionable findings, records manual testing, and verifies CI before merge.
 
 Project-document templates live under
 `.agents/skills/ai-project-manager/assets/project-docs/`. Adapt them to the

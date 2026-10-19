@@ -64,9 +64,9 @@ requirements and instructions.
 ### Reusable workflows
 
 - **REQ-WORKFLOW-01:** Provide project-planning templates and keep planning
-  separate from pull-request readiness. Local review uses the built-in
-  `codex review --uncommitted` loop, with validation and review repeated after
-  each actionable fix.
+  separate from pull-request readiness. Local review uses built-in Codex review
+  with the scope matching uncommitted work, a branch, or a commit, with affected
+  validation and review repeated after each actionable fix.
 - **REQ-WORKFLOW-02:** Provide focused skills for the recurring domains listed
   under [Users and environments](#users-and-environments), including
   Codex-native Graphify and live Unreal Editor workflows.

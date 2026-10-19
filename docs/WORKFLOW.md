@@ -30,14 +30,19 @@
 9. Stop for plan approval when the user reserved that checkpoint.
 10. Implement one approved phase, run focused checks, and inspect the diff.
 11. Run the complete local gate and update task status only after it passes.
-12. Use `$pr-readiness` to run the built-in Codex review:
+12. Use `$pr-readiness` to run built-in Codex review with the matching scope:
 
     ```bash
     codex review --uncommitted
+    codex review --base <target-branch>
+    codex review --commit <sha>
     ```
 
+    Choose uncommitted work, a branch against its actual target, or one commit.
+    Cover both committed and uncommitted work when the request includes both.
+
 13. Verify every finding against the current diff. Fix only actionable defects,
-    rerun affected validation, and repeat `codex review --uncommitted` until no
+    rerun affected validation, and repeat review of the affected scope until no
     actionable findings remain. Document verified false positives without
     changing correct code. A review-mode Codex instance reports findings
     directly and must not launch another nested review.
