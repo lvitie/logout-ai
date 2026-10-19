@@ -19,6 +19,9 @@ layout {
             pane size="40%" name="tasks" command="@@PYTHON@@" {
                 args "@@AGENT_TEAM@@/tasks_tui"
             }
+            pane size=4 name="alerts" command="@@PYTHON@@" {
+                args "@@AGENT_TEAM@@/notifier"
+            }
             pane name="coordinator" focus=true command="@@PYTHON@@" {
                 args "@@AGENT_TEAM@@/chat"
             }

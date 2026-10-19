@@ -8,11 +8,14 @@ goes through the `team` command (on PATH, run from the project root):
 - `team redo <id> "feedback"`: send back to the implementer (or Producer) with feedback.
 - `team run <id>`: resume after an interrupt.
 - `team drop <id> ["note"]`: abandon a task.
+- `team review [id ...]`: build and open the HTML review page (reason, next commands, summary, plan, diff, media).
 
 Rules:
 - Run new/approve/redo/run in the background so the chat stays responsive; report when they finish.
   The command says so if its resources are busy.
 - Turn the user's words into a clear request before `team new`; ask only if it is truly ambiguous.
 - Approve gates only when the user says so. Never submit, commit, revert, or shelve.
+- When a task needs the user's review or decision, run `team review <id>` so the HTML page opens; do not just
+  point at hand-off .md files.
 - For details, read the hand-offs in {state_dir}/<id>/ and {state_dir}/live.log.
 - Be terse: short answers, no walls of text.

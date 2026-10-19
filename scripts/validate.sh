@@ -289,7 +289,6 @@ if ! bash -n \
   "$repo_root/agent-team/bin/team" \
   "$repo_root/agent-team/templates/team.sh" \
   "$repo_root/agent-team/notify" \
-  "$repo_root/agent-team/notifier" \
   "$repo_root/scripts/validate.sh"; then
   fail "Bash syntax validation failed"
 fi
@@ -305,7 +304,6 @@ if command -v shellcheck >/dev/null 2>&1; then
     "$repo_root/agent-team/bin/team" \
     "$repo_root/agent-team/templates/team.sh" \
     "$repo_root/agent-team/notify" \
-    "$repo_root/agent-team/notifier" \
     "$repo_root/scripts/validate.sh" ||
     fail "ShellCheck failed"
 fi

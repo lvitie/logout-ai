@@ -7,7 +7,8 @@ from a larger game project; everything project-specific lives in one `team.toml`
 Requirements: Linux or Windows, Python 3.11 or newer (`tomllib`), `claude` and/or `codex` on `PATH`, `git` (or `p4`,
 or another adapter). `zellij` for the dashboard. Locks use `fcntl` on Linux and `msvcrt` on Windows. The unit tests
 use Linux fakes, so `scripts/validate.sh` runs them on Linux only; Windows CI runs `scripts/test-setup-agent-team.ps1`.
-Desktop notifications (`notifier`, `notify`) need `notify-send` and stay Linux-only. Nothing here is installed by
+The dashboard's alerts pane (`notifier`) opens the HTML review page whenever a task needs the user or finishes, and
+notifies through `notify-send` (Linux, `notify`) or a tray balloon (Windows). Nothing here is installed by
 `scripts/install.sh`; use the setup script below. The README has a step-by-step setup guide.
 
 ## Install
@@ -54,7 +55,8 @@ team status [id]                  # `-r` newest first
 team approve <id> ["note"]        # pass a gate or retry after escalation/failure
 team redo <id> "feedback"         # send back to the implementer (or Producer)
 team drop <id> ["note"]
-team-up                           # zellij dashboard: usage, focus, live log, tasks, coordinator chat
+team review [id ...]              # build and open the HTML review page (default: the latest done tasks)
+team-up                           # zellij dashboard: usage, focus, live log, tasks, alerts, coordinator chat
 team-up "request"                 # same as team new
 ./team.sh                         # install missing dependencies and open the dashboard
 .\team.ps1                        # the same on Windows
@@ -93,8 +95,8 @@ On Windows the coordinator runs npm-installed CLIs through their node script rat
 | `agent-team/write_config.py` | writes a new `team.toml` from the agent and VCS presets (used by both setup scripts) |
 | `agent-team/hooks/vcs_open.py` | Claude hook: opens files in the task change before edits |
 | `agent-team/usage_tui`, `codex_reset_consume.py`, `statusline_hook` | usage panel, opt-in Codex reset, Claude statusline dump |
-| `agent-team/focus_tui`, `log_tui`, `tasks_tui`, `chat`, `notifier`, `notify` | dashboard panes and notifications |
-| `agent-team/review_page`, `view_model`, `model_viewer/` | local review webpage, local 3D model viewer |
+| `agent-team/focus_tui`, `log_tui`, `tasks_tui`, `chat`, `notifier`, `notify` | dashboard panes, alerts and notifications |
+| `agent-team/review_page`, `view_model`, `model_viewer/` | HTML review page (`team review`), local 3D model viewer |
 | `agent-team/templates/` | `team.toml`, `team.sh`, `team.ps1`, `team.kdl`, `jobs/`, `roles/`, `vcs/` prompt templates |
 | `examples/unreal-p4/` | the original Unreal + Perforce config and role files (examples only) |
 | `agent-team/tests/` | unit and smoke tests |

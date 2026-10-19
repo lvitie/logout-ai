@@ -588,7 +588,7 @@ def route_task(s):
     s["title"] = title or s["request"].splitlines()[0][:60]
     VCS.set_description(s["change"], f"[team {s['id']}] {s['title']}")
     if route == "ask":
-        s["status"], s["reason"] = "blocked", "Producer needs a decision; read the spec, then `team redo`."
+        s["status"], s["reason"] = "blocked", f"Producer needs a decision; see `team review {s['id']}`, then `team redo`."
     elif route not in ROUTES or domain not in DOMAINS:
         s["status"], s["reason"] = "failed", f"Producer gave ROUTE={route} DOMAIN={domain}"
     else:
@@ -695,7 +695,7 @@ def advance(s):
             else:
                 stages = pipeline(s["route"], s["domain"])
                 if s["stage"] >= len(stages):
-                    s["status"], s["reason"] = "done", f"Review {noun()} {s['change']}; the user submits it."
+                    s["status"], s["reason"] = "done", f"Review {noun()} {s['change']} (`team review {s['id']}`); the user submits it."
                     s["finished"] = time.time()
                 else:
                     step(s, stages)
@@ -790,6 +790,12 @@ def cmd_redo(a):
     advance(s)
 
 
+def cmd_review(a):
+    """Build the HTML review page for the given tasks (default: the latest done ones) and open it."""
+    page = subprocess.run([sys.executable, str(HERE / "review_page"), *a.ids, "--open"])
+    sys.exit(page.returncode)
+
+
 def under_watch():
     """True when run by `watch` (the dashboard task pane): walk up the parent processes."""
     pid = os.getppid()
@@ -859,6 +865,9 @@ def main():
     p.add_argument("id")
     p.add_argument("note")
     p.set_defaults(func=cmd_redo)
+    p = sub.add_parser("review", help="open the HTML review page for tasks (default: the latest done ones)")
+    p.add_argument("ids", nargs="*")
+    p.set_defaults(func=cmd_review)
     p = sub.add_parser("status", help="list tasks, or show one")
     p.add_argument("-r", "--reverse", action="store_true", help="newest task first")
     p.add_argument("id", nargs="?")

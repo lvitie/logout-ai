@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Quick review webpage: review_page [tNNN ...] [--since tNNN] [--open]
 Builds <state_dir>/review/review.html (local, offline; markdown rendered by marked.min.js if you drop it next to the page,
-otherwise shown as plain text).
-Each task card: status, CL, summary + review hand-offs and the changed docs/*.md rendered as formatted text,
-plus stills and clips from its packet. Default: every task newer than --since, or the last 8 done tasks."""
-import html, json, os, re, shutil, sys
+otherwise shown as preformatted text) and with --open shows it in the default browser.
+Each task card: status, change, why it needs the user and the commands for the next step, summary + review hand-offs,
+the plan (or the Producer's spec), the diff and the changed docs/*.md, plus stills and clips from its packet.
+Default: every task newer than --since, or the last 8 done tasks."""
+import html, json, os, re, shutil, sys, webbrowser
 from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
@@ -48,6 +49,22 @@ def changed_docs(change):
     return docs[:4]
 
 
+def state(t):
+    try:
+        return json.loads((RUNS / t / "state.json").read_text())
+    except (OSError, ValueError):  # e.g. a hand-off packet folder without task state
+        return None
+
+
+NEXT = {  # what the user does next, by status
+    "gate": "team approve {t} [\"note\"]  # pass the gate\nteam redo {t} \"feedback\"  # send it back",
+    "blocked": "team redo {t} \"answer\"  # answer and re-run\nteam approve {t} [\"note\"]",
+    "escalated": "team approve {t} [\"note\"]  # retry with fresh rounds\nteam redo {t} \"feedback\"\nteam drop {t} [\"note\"]",
+    "failed": "team approve {t} [\"note\"]  # retry\nteam redo {t} \"feedback\"\nteam drop {t} [\"note\"]",
+    "done": "# review the changes above, then commit or submit them yourself\nteam redo {t} \"feedback\"  # more work",
+}
+
+
 def md(text):  # embedded as a JSON string, rendered client-side
     return "<div class=md data-md='" + html.escape(json.dumps(text), quote=True).replace("'", "&#39;") + "'></div>"
 
@@ -61,13 +78,14 @@ def main():
     since = None
     if "--since" in sys.argv:
         since = sys.argv[sys.argv.index("--since") + 1]
-    allt = sorted(p.name for p in RUNS.glob("t0[0-9][0-9]"))
+    allt = sorted((p.name for p in RUNS.glob("t[0-9]*") if p.name[1:].isdigit() and state(p.name)),
+                  key=lambda t: int(t[1:]))
+    tids = [t for t in tids if t in allt]
     if not tids:
         if since:
             tids = [t for t in allt if int(t[1:]) > int(since[1:])]
         else:
-            done = [t for t in allt if json.load(open(RUNS / t / "state.json")).get("status") == "done"]
-            tids = done[-8:]
+            tids = [t for t in allt if state(t).get("status") == "done"][-8:]
     badge = {"done": "#2e7d32", "blocked": "#b26a00", "gate": "#b26a00", "escalated": "#c62828", "failed": "#c62828", "running": "#1565c0"}
     h = ["""<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>
 <title>__NAME__ review</title><style>
@@ -76,21 +94,35 @@ h1{color:#ff7a45}.card{background:#1f1a17;border:1px solid #3a302a;border-radius
 .b{padding:2px 8px;border-radius:9px;color:#fff;font-size:13px}.g{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:8px;margin-top:8px}
 img,video{width:100%;border-radius:6px}.md{overflow-x:auto}.md pre,.md code{background:#2a221d;border-radius:5px;padding:2px 5px}.md pre{padding:10px;overflow-x:auto}
 .md table{border-collapse:collapse}.md td,.md th{border:1px solid #3a302a;padding:4px 8px}.md a{color:#ff9a6b}
-details{margin-top:8px}summary{cursor:pointer;color:#ff9a6b}nav a{margin-right:10px;color:#ff9a6b}small{color:#a89c90}</style>""".replace("__NAME__", html.escape(NAME))]
+details{margin-top:8px}summary{cursor:pointer;color:#ff9a6b}nav a{margin-right:10px;color:#ff9a6b}small{color:#a89c90}
+.md.raw,pre.diff{white-space:pre-wrap;font:13px/1.45 ui-monospace,monospace}pre.diff,pre.next{background:#2a221d;border-radius:6px;padding:10px;overflow-x:auto}
+.reason{border-left:3px solid #ff7a45;padding-left:10px}</style>""".replace("__NAME__", html.escape(NAME))]
     h.append(f"<h1>{html.escape(NAME)} review</h1><nav><a href=#decisions>Decisions</a>{''.join(f'<a href=#{html.escape(t)}>{html.escape(t)}</a>' for t in tids)}</nav>")
     dec = RUNS / "decisions.md"
     if dec.exists() and dec.read_text().strip():
         h.append("<div class=card id=decisions style='border-color:#ff7a45'><h2>Decisions needed</h2>" + md(dec.read_text()) + "</div>")
     for t in tids:
-        s = json.load(open(RUNS / t / "state.json"))
+        s = state(t)
         c = badge.get(s["status"], "#555")
-        h.append(f"<div class=card id={t}><h2>{t} · {html.escape(s['title'])} <span class=b style='background:{c}'>{html.escape(s['status'])}</span> <small>{html.escape(str(s.get('change')))}</small></h2>")
+        h.append(f"<div class=card id={t}><h2>{t} · {html.escape(s['title'] or s['request'].splitlines()[0])} <span class=b style='background:{c}'>{html.escape(s['status'])}</span> <small>{html.escape(str(s.get('change')))}</small></h2>")
+        if s.get("reason"):
+            h.append(f"<p class=reason>{html.escape(s['reason'])}</p>")
+        if s["status"] in NEXT:
+            h.append("<pre class=next>" + html.escape(NEXT[s["status"]].format(t=t)) + "</pre>")
         impl = last(t, "*implement*.md") or last(t, "*implementation*.md")
         rev = last(t, "*review-*.md")
+        plan, label = last(t, "*-plan-*.md"), "Plan"
+        if not plan:  # the Producer's spec holds a blocked route's question
+            plan, label = last(t, "*-route-*.md"), "Producer spec"
         if impl:
             h.append("<details open><summary>Implementation summary</summary>" + md(impl[:6000]) + "</details>")
         if rev:
             h.append("<details><summary>Review verdict</summary>" + md(rev[:4000]) + "</details>")
+        if plan:
+            h.append(f"<details{'' if impl else ' open'}><summary>{label}</summary>" + md(plan[:8000]) + "</details>")
+        diff = (RUNS / t / "changes.diff").read_text(errors="ignore") if (RUNS / t / "changes.diff").is_file() else ""
+        if diff.strip():
+            h.append("<details><summary>Diff (snapshot from the last stage)</summary><pre class=diff>" + html.escape(diff[:200_000]) + "</pre></details>")
         for d in changed_docs(s.get("change")) if s.get("change") else []:
             h.append(f"<details><summary>Doc: {html.escape(d.name)}</summary>" + md(d.read_text(errors='ignore')[:60000]) + "</details>")
         vids, imgs = media(t, {".mp4", ".webm"}, 4, 40), media(t, {".png", ".jpg", ".jpeg"}, 10, 6)
@@ -100,11 +132,13 @@ details{margin-top:8px}summary{cursor:pointer;color:#ff9a6b}nav a{margin-right:1
             h.append("<div class=g>" + "".join(f"<a href='media/{i}'><img loading=lazy src='media/{i}'></a>" for i in imgs) + "</div>")
         h.append("</div>")
     h.append("""<script src=marked.min.js></script><script>
-document.querySelectorAll('.md').forEach(e=>{const t=JSON.parse(e.dataset.md);if(window.marked)e.innerHTML=marked.parse(t);else e.textContent=t});</script>""")
+document.querySelectorAll('.md').forEach(e=>{const t=JSON.parse(e.dataset.md);if(window.marked)e.innerHTML=marked.parse(t);else{e.textContent=t;e.classList.add('raw')}});</script>""")
     (OUT / "review.html").write_text("\n".join(h))
     if dec.exists() and dec.read_text().strip():  # standalone decisions page, same styling
         (OUT / "decisions.html").write_text(h[0] + "<h1>Decisions needed</h1><div class=card>" + md(dec.read_text()) + "</div>" + h[-1])
     print(OUT / "review.html", len(tids), "tasks")
+    if "--open" in sys.argv:
+        webbrowser.open((OUT / "review.html").as_uri())
 
 
 main()

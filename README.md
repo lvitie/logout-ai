@@ -289,9 +289,12 @@ npm. If PowerShell refuses to run local scripts, allow them for your user with
 
 ### 5. Work with the team
 
-The Zellij dashboard shows usage, focus, the live log, and the task list, and
-has a coordinator chat where you can ask for work in plain language. The same
-actions are available as commands from the project directory:
+The Zellij dashboard shows usage, focus, the live log, the task list, and an
+alerts pane, and has a coordinator chat where you can ask for work in plain
+language. When a task needs you (a gate, a question, a failure) or finishes,
+the alerts pane sends a desktop notification and opens an HTML review page with
+the reason, the commands for the next step, the summary, plan, diff, and media.
+The same actions are available as commands from the project directory:
 
 ```text
 team new "add a stamina bar"     # create a task, route it, run the pipeline
@@ -299,6 +302,7 @@ team status [id]                 # all tasks, or one task in detail
 team approve <id> ["note"]       # pass a gate, or retry after a failure
 team redo <id> "feedback"        # send the work back with feedback
 team drop <id> ["note"]          # abandon a task
+team review [id ...]             # open the HTML review page
 ```
 
 When a task is `done`, review the working-tree diff (git) or the task's

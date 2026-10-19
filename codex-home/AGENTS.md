@@ -66,6 +66,9 @@
 - Preserve user-supplied publication-ready commands, links, examples,
   verification steps, and update procedures unless the user asks to condense
   them.
+- When work needs human review or a decision, present it as a local HTML page
+  (rendered summary, the decision or question, diff, media, and the next
+  commands) and open it, instead of only pointing at Markdown files.
 
 ## Scope selection
 

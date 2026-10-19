@@ -1,30 +1,71 @@
-#!/usr/bin/env bash
-# Watches the agent team; pops a desktop notification with sound when something needs the user.
-here="$(dirname "$(readlink -f "$0")")"
-eval "$(python3 "$here/teamcfg.py" --shell)"
-export TEAM_CONFIG TEAM_NOTIFY_APP TEAM_NOTIFY_SOUND_DIR TEAM_NOTIFY_SOUND TEAM_NOTIFY_SOUND_URGENT PATH="$here/bin:$here:$PATH"
-cd "$TEAM_ROOT" || exit 1
-declare -A seen
-while true; do
-  while read -r id st rest; do
-    case "$st" in
-      gate | blocked | escalated | failed)
-        key="$id:$st"
-        if [ -z "${seen[$key]:-}" ]; then
-          seen[$key]=1
-          reason=$(team status "$id" 2>/dev/null | sed -n '2,3p' | tr '\n' ' ' | cut -c1-180)
-          notify "$TEAM_NAME: $id $st" "$reason" urgent
-        fi
-        ;;
-      done)
-        key="$id:done"
-        if [ -z "${seen[$key]:-}" ]; then
-          seen[$key]=1
-          [ -n "${INIT:-}" ] && notify "$TEAM_NAME: $id done" "$rest"
-        fi
-        ;;
-    esac
-  done < <(team status 2>/dev/null | grep -E "^t[0-9]+ ")
-  INIT=1
-  sleep 30
-done
+#!/usr/bin/env python3
+"""Dashboard "alerts" pane: when a task needs the user (gate, blocked, escalated, failed) or is done, pops a desktop
+notification and opens the HTML review page for it. Tasks already in such a state when it starts are reported once
+(done ones are not). --once checks a single time and exits."""
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+sys.path.insert(0, HERE)
+import teamcfg  # noqa: E402
+
+CFG = teamcfg.load()
+RUNS, NAME, N = CFG["state"], CFG["project"]["name"], CFG["notify"]
+ATTENTION = ("gate", "blocked", "escalated", "failed")
+QUIET = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+
+
+def states():
+    found = {}
+    for d in RUNS.glob("t[0-9]*"):
+        try:
+            s = json.loads((d / "state.json").read_text())
+            found[s["id"]] = s
+        except (OSError, ValueError, KeyError):  # not a task folder, or mid-write
+            continue
+    return found
+
+
+def notify(title, body, urgent):
+    if os.name == "nt":  # a tray balloon needs no extra module; text travels in env vars to avoid quoting
+        exe = shutil.which("pwsh") or shutil.which("powershell")
+        script = ("Add-Type -AssemblyName System.Windows.Forms; $n = New-Object System.Windows.Forms.NotifyIcon; "
+                  "$n.Icon = [System.Drawing.SystemIcons]::Information; $n.Visible = $true; "
+                  "$n.ShowBalloonTip(10000, $env:TEAM_ALERT_TITLE, $env:TEAM_ALERT_BODY, 'Info'); "
+                  "Start-Sleep -Seconds 10; $n.Dispose()")
+        if exe:
+            subprocess.Popen([exe, "-NoProfile", "-NonInteractive", "-Command", script],
+                             env=dict(os.environ, TEAM_ALERT_TITLE=title, TEAM_ALERT_BODY=body), **QUIET)
+    elif shutil.which("notify-send"):
+        env = dict(os.environ, TEAM_NOTIFY_APP=N["app_name"] or NAME, TEAM_NOTIFY_SOUND_DIR=N["sound_dir"],
+                   TEAM_NOTIFY_SOUND=N["sound_normal"], TEAM_NOTIFY_SOUND_URGENT=N["sound_urgent"])
+        subprocess.Popen([os.path.join(HERE, "notify"), title, body, *(["urgent"] if urgent else [])], env=env, **QUIET)
+
+
+def check(seen, first):
+    review = []
+    for tid, s in sorted(states().items()):
+        status = s.get("status")
+        if seen.get(tid) == status:
+            continue
+        seen[tid] = status
+        if status in ATTENTION or (status == "done" and not first):
+            reason = " ".join((s.get("reason") or s.get("title") or "").split())[:180]
+            notify(f"{NAME}: {tid} {status}", reason, status != "done")
+            print(f"\a{time.strftime('%H:%M')} {tid} {status}: {reason}", flush=True)
+            review.append(tid)
+    if review:  # one page for everything that changed in this pass
+        subprocess.run([sys.executable, os.path.join(HERE, "review_page"), *review, "--open"], **QUIET)
+
+
+if __name__ == "__main__":
+    seen = {}
+    print(f"watching {NAME} for tasks that need you", flush=True)
+    check(seen, True)
+    while "--once" not in sys.argv:
+        time.sleep(10)
+        check(seen, False)

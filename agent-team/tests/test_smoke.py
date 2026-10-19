@@ -243,6 +243,52 @@ class Project(unittest.TestCase):
         self.assertNotIn("<script>alert(1)", page)
         self.assertIn(html.escape("<script>alert(1)</script>"), page)
 
+    def set_state(self, tid, **fields):
+        sp = self.proj / f".agent-team/{tid}/state.json"
+        s = json.loads(sp.read_text())
+        s.update(fields)
+        sp.write_text(json.dumps(s))
+
+    def test_review_page_next_steps_and_diff(self):
+        self.team("new", "--no-run", "needs a call")
+        self.set_state("t001", status="gate", reason="Architect: pick a save format")
+        (self.proj / ".agent-team/t001/changes.diff").write_text("+added <line>\n")
+        (self.proj / ".agent-team/t100").mkdir()
+        (self.proj / ".agent-team/t100/state.json").write_text(json.dumps(dict(
+            json.loads((self.proj / ".agent-team/t001/state.json").read_text()), id="t100", status="done")))
+        (self.proj / ".agent-team/t101").mkdir()  # a packet folder without task state is skipped
+        r = subprocess.run([sys.executable, "-I", str(ROOT / "review_page"), "t001"], cwd=self.proj, env=self.env,
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        page = (self.proj / ".agent-team/review/review.html").read_text()
+        self.assertIn("Architect: pick a save format", page)
+        self.assertIn("team approve t001", page)
+        self.assertIn(html.escape("+added <line>"), page)
+        r = subprocess.run([sys.executable, "-I", str(ROOT / "review_page")], cwd=self.proj, env=self.env,
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("id=t100", (self.proj / ".agent-team/review/review.html").read_text())
+
+    def test_notifier_opens_review_page(self):
+        opened = Path(self.tmp.name) / "opened"
+        browser = self.fake / "browser"
+        browser.write_text(f"#!{sys.executable}\nimport sys\nopen({str(opened)!r}, 'a').write(sys.argv[1] + '\\n')\n")
+        browser.chmod(0o755)
+        env = dict(self.env, BROWSER=str(browser), PATH=f"{self.fake}:/usr/bin:/bin")  # no notify-send
+        for request in ("waiting", "finished"):
+            self.team("new", "--no-run", request)
+        self.set_state("t001", status="gate", reason="Senior Dev: confirm the API")
+        self.set_state("t002", status="done")
+        r = subprocess.run([sys.executable, "-I", str(ROOT / "notifier"), "--once"], cwd=self.proj, env=env,
+                           capture_output=True, text=True, timeout=30)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("t001 gate: Senior Dev: confirm the API", r.stdout)
+        self.assertNotIn("t002", r.stdout)  # done before the dashboard started: not re-announced
+        self.assertTrue(opened.read_text().strip().endswith("review/review.html"))
+        page = (self.proj / ".agent-team/review/review.html").read_text()
+        self.assertIn("id=t001", page)
+        self.assertNotIn("id=t002", page)
+
 
 if __name__ == "__main__":
     unittest.main()
