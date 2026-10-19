@@ -1,7 +1,7 @@
 # Agent team
 
 A project-agnostic coordinator that runs Claude Code and Codex CLI agents as a small team: a Producer routes a
-task, then plan / implement / review stages run one agent at a time per task, with hand-offs as files. Extracted
+task, then plan / implement / review stages run one agent at a time per task, with hand-offs as Markdown (`.md`) files. HTML pages are only for user reviews and blockers, never agent-to-agent handoffs. Extracted
 from a larger game project; everything project-specific lives in one `team.toml` plus optional templates.
 
 Requirements: Linux or Windows, Python 3.11 or newer (`tomllib`), `claude` and/or `codex` on `PATH`, `git` (or `p4`,

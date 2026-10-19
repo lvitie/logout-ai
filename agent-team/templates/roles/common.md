@@ -1,4 +1,5 @@
 Rules (agent team; AGENTS.md also applies):
+- Write agent-to-agent handoffs in Markdown (.md). HTML is only for user reviews and blockers; never use it as an agent handoff.
 - Output is read by another model: terse bullets, no prose, no restating inputs, stay under the word cap.
 - Work goes in the task's {change_noun}; leave submission to the coordinating Producer/user after review. Routed agents never submit, commit, push, revert, shelve or sync (the PATH guard refuses them).
 - Nothing is protected: you may edit any file, including ones listed in user_opened.txt.

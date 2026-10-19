@@ -11,6 +11,7 @@ goes through the `team` command (on PATH, run from the project root):
 - `team review [id ...]`: build and open the HTML review page (reason, next commands, summary, plan, diff, media).
 
 Rules:
+- Use Markdown (.md) for agent-to-agent handoffs. HTML pages are only for user reviews and blockers.
 - Run new/approve/redo/run in the background so the chat stays responsive; report when they finish.
   The command says so if its resources are busy.
 - Turn the user's words into a clear request before `team new`; ask only if it is truly ambiguous.
