@@ -14,8 +14,10 @@ producer, name = cfg["roles"]["producer"], cfg["project"]["name"]
 os.environ["TEAM_CONFIG"] = cfg["config_path"]
 os.environ["PATH"] = os.path.join(here, "bin") + os.pathsep + os.environ.get("PATH", "")
 os.chdir(cfg["root"])
+skill = os.path.join(os.path.dirname(here), ".agents", "skills", "team-setup", "SKILL.md")
 prompt = (teamcfg.template(cfg, "roles/coordinator.md").replace("{project}", name)
-          .replace("{state_dir}", cfg["project"]["state_dir"]))
+          .replace("{state_dir}", cfg["project"]["state_dir"]).replace("{config}", cfg["config_path"])
+          .replace("{team_setup}", skill))
 if producer["cli"] == "codex":
     argv = ["codex", "--model", producer["model"], "-c", f'model_reasoning_effort="{producer["effort"]}"',
             "-c", f"developer_instructions={json.dumps(prompt)}"]

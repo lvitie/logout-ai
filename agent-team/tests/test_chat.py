@@ -46,6 +46,11 @@ class ChatTests(unittest.TestCase):
                     prompt = record['args'][record['args'].index('--append-system-prompt') + 1]
                 self.assertIn('myproject agent team', prompt)
                 self.assertIn('team new', prompt)
+                skill = ROOT.parent / '.agents/skills/team-setup/SKILL.md'
+                self.assertIn(str(skill), prompt)  # both CLIs reach the setup skill by path
+                self.assertTrue(skill.is_file())
+                self.assertIn(str(project / 'team.toml'), prompt)
+                self.assertNotIn('{', prompt)
 
     def test_invalid_config_does_not_launch(self):
         with tempfile.TemporaryDirectory() as tmp:

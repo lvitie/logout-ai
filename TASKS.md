@@ -43,6 +43,10 @@
 - [x] Queue busy runs instead of refusing them, start queued tasks from the alerts
   pane (`team queue`, queue-file order and `after tNNN`), and let the coordinator
   wait for attention events with `team wait` instead of polling.
+- [x] Let the coordinator edit team config and docs, and add the `team-setup`
+  skill: an interactive interview (Claude and Codex) that proposes
+  project-specific agents and writes them after confirmation.
+- [ ] Run `team-setup` interactively from a real Claude and Codex coordinator.
 
 ## Next phase: Enforced repository governance
 

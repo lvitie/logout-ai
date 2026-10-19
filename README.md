@@ -297,7 +297,9 @@ the reason, the commands for the next step, the summary, plan, diff, and media.
 When every slot or lock is busy, a new or approved task is queued instead of
 refused, and the alerts pane starts it once capacity frees up. The coordinator
 keeps a `team wait` running, so it hears about gates, failures and finished
-tasks without polling. The same actions are available as commands from the project directory:
+tasks without polling. To tailor the team to the project, ask the coordinator
+to set up the team: it interviews you, proposes project-specific agents, and
+writes `team.toml` and the role prompts once you confirm. The same actions are available as commands from the project directory:
 
 ```text
 team new "add a stamina bar"     # create a task, route it, run the pipeline

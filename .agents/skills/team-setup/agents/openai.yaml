@@ -1,0 +1,4 @@
+interface:
+  display_name: "Team Setup"
+  short_description: "Tailor the agent team's roles to a project"
+  default_prompt: "Use $team-setup to configure the agent team for this project."

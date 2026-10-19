@@ -73,6 +73,7 @@ clear `name` and `description`.
 - `rust-web`
 - `substance-designer-python`
 - `substance-painter-python`
+- `team-setup`
 - `unreal-cpp`
 - `unreal-materials`
 - `unreal-mcp-workflow`

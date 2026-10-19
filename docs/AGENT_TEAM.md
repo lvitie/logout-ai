@@ -99,6 +99,12 @@ remembers what it reported in `.wait-seen.json`, so changes between two waits ar
 first wait reports what needs attention but not tasks that were already done. Claude Code wakes the coordinator
 when its background `team wait` exits; a CLI without that runs `team wait --no-block` at the start of each turn.
 
+The coordinator chat may edit the team config, its role prompts, the hand-edited state inputs and planning docs
+itself; project work still goes through `team new`. To tailor the team, ask the coordinator to set it up: it
+follows the `team-setup` skill (`.agents/skills/team-setup/SKILL.md`, passed to both CLIs by path), which
+interviews you about the project, proposes roles, models, domains, routing, locks, probes and shared rules, and
+writes `team.toml` and `<templates_dir>/roles/*.md` only after you confirm.
+
 `team` finds the config through `--config <path>` (before the subcommand), else `$TEAM_CONFIG`, else the nearest `team.toml` above the current directory. `teamcfg.load` rejects unknown role names anywhere in `[routing]`.
 
 ## Layout
