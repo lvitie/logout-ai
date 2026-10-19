@@ -41,8 +41,10 @@
     actionable findings remain. Document verified false positives without
     changing correct code. A review-mode Codex instance reports findings
     directly and must not launch another nested review.
-14. Commit the focused change, push it, and open a draft pull request only when
-    authorized.
+14. Commit the focused change, push it, and open a ready-for-review pull request
+    only when authorized. Create or leave a draft only when the user explicitly
+    requests one. If known gates remain, stop before opening the pull request
+    and report the blockers.
 15. Require a completed Codex review loop, CI validation, applicable security
     checks, and a fresh independent review on the latest commit.
 16. Fix or explain every review item, resolve completed threads, and repeat the
