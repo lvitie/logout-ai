@@ -136,7 +136,7 @@ plugin state, and runtime databases remain outside repository ownership.
 - Installing Codex or Claude Code through the baseline installer or project
   seeding. The explicitly invoked agent-team `team.sh` and `team.ps1` launchers
   may install missing configured CLIs and dashboard dependencies.
-- Installing third-party review CLIs, RTK, local model servers, Graphify, or the
+- Installing third-party review CLIs, local model servers, Graphify, or the
   Unreal MCP server.
 - Installing project dependencies or initializing version control as part of
   project seeding.
