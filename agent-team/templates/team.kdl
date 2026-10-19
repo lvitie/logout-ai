@@ -16,7 +16,7 @@ layout {
             }
         }
         pane split_direction="horizontal" {
-            pane size=4 name="alerts" command="@@PYTHON@@" {
+            pane size=6 name="alerts" command="@@PYTHON@@" {
                 args "@@AGENT_TEAM@@/notifier"
             }
             pane size="40%" name="tasks" command="@@PYTHON@@" {
