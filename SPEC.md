@@ -146,8 +146,9 @@ plugin state, and runtime databases remain outside repository ownership.
 
 - **AC-01:** `./scripts/validate.sh` passes from a clean checkout.
 - **AC-02:** Linux and macOS installer integration tests verify dry-run safety,
-  timestamped backups, correct links, exact generated trust entries, and
-  idempotence in isolated temporary directories.
+  timestamped backups, preserved machine-local configuration state, correct
+  links, exact generated trust entries, and idempotence in isolated temporary
+  directories.
 - **AC-03:** Windows CI verifies the equivalent PowerShell installer behavior.
 - **AC-04:** Installer tests verify plugin opt-in and dry-run behavior without
   contacting a live marketplace.
