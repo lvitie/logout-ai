@@ -23,19 +23,6 @@ for tools that load it automatically.
 
 ## Command execution
 
-- Use `rtk` when command output is likely to be large or repetitive and a
-  filtered summary is sufficient. Good candidates include test suites, builds,
-  linters, logs, broad searches, dependency listings, and infrastructure
-  status commands.
-- Use raw commands when output is expected to be short, when exact or complete
-  output matters, or when inspecting a specific file or narrowly scoped result.
-- In command chains, apply `rtk` only to segments that benefit from filtering.
-- If RTK hides needed detail, rejects a command or flag, or complicates
-  debugging, rerun the command raw. Do not use `rtk proxy` merely to satisfy an
-  RTK convention.
-- If a task is primarily Bash or command-line automation, consider RTK for
-  noisy validation commands, but keep commands raw when validating exact
-  stdout, stderr, exit-status, quoting, or pipeline behavior.
 - Prefer running code, tests, linters, and type checks over guessing.
 - Read complete errors, logs, and stack traces before fixing them.
 
@@ -52,7 +39,6 @@ for tools that load it automatically.
 
 ## Editing
 
-- Use simple ASCII punctuation unless a file format requires otherwise.
 - Keep credentials, tokens, sessions, history, caches, logs, and runtime
   databases out of this repository.
 - Put reusable workflows in `.agents/skills/<name>/SKILL.md`.
@@ -104,5 +90,9 @@ Read only the documents needed for the task:
 
 - Keep this file short enough to follow. Add rules only when they prevent a real
   repeat mistake or document durable project behavior.
+- Route corrections to the narrowest durable scope: cross-repository behavior
+  belongs in `codex-home/AGENTS.md`, reusable workflows belong in a skill, and
+  project-specific behavior belongs in that project's `AGENTS.md` or
+  specification. Do not duplicate the same rule across scopes.
 - When the user corrects an approach, tighten the relevant rule instead of
   appending a vague warning.
