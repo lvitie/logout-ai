@@ -5,11 +5,11 @@ Reads $CODEX_HOME/sessions and $CLAUDE_CONFIG_DIR/projects; never auth.json. The
 Claude Code's OAuth token) is used only when team.toml [usage] claude_endpoint = true."""
 import glob
 import json
-import fcntl
 import os
+import queue
 import re
-import select
 import subprocess
+import threading
 import time
 import sys
 import urllib.request
@@ -161,11 +161,13 @@ def _cx_request(method, params, timeout):
     if log:
         with open(log, "a") as f:
             f.write(f"{time.time():.0f} pid={os.getpid()}\n")
-    p = subprocess.Popen(["codex", "app-server"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+    p = subprocess.Popen(teamcfg.command(["codex", "app-server"]), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                          stderr=subprocess.DEVNULL, bufsize=0)
     try:
-        fd, buf, end = p.stdout.fileno(), b"", time.monotonic() + timeout
-        os.set_blocking(fd, False)
+        buf, end, chunks = b"", time.monotonic() + timeout, queue.Queue()
+        # a reader thread instead of select(): Windows cannot select() on pipes
+        threading.Thread(target=lambda: [chunks.put(c) for c in iter(lambda: os.read(p.stdout.fileno(), 65536), b"")]
+                         + [chunks.put(b"")], daemon=True).start()
 
         def send(o):
             p.stdin.write((json.dumps(o) + "\n").encode()); p.stdin.flush()
@@ -186,11 +188,13 @@ def _cx_request(method, params, timeout):
                 left = end - time.monotonic()
                 if left <= 0:
                     raise TimeoutError("codex app-server timed out")
-                if select.select([fd], [], [], min(left, 0.5))[0]:
-                    chunk = os.read(fd, 65536)
-                    if not chunk:
-                        raise EOFError("codex app-server closed")
-                    buf += chunk
+                try:
+                    chunk = chunks.get(timeout=min(left, 0.5))
+                except queue.Empty:
+                    continue
+                if not chunk:
+                    raise EOFError("codex app-server closed")
+                buf += chunk
 
         send({"id": 1, "method": "initialize", "params": {"clientInfo": {"name": "agent-team-usage", "version": "1"}}})
         wait_for(1)
@@ -278,10 +282,10 @@ def codex_resets(deadline=None):
         fetching = False
         try:
             os.makedirs(os.path.dirname(CX_CACHE), exist_ok=True)
-            lock = open(CX_CACHE + ".lock", "w")
+            lock = open(CX_CACHE + ".lock", "a")
             while True:  # polled so the caller's deadline holds
                 try:
-                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    teamcfg.lock(lock, blocking=False)
                     break
                 except OSError:
                     remaining = deadline - time.monotonic()

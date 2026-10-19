@@ -218,6 +218,123 @@ of being turned into a reusable skill.
 Project bootstrap does not install dependencies, initialize Git, deploy, or
 perform destructive changes unless those actions are requested explicitly.
 
+## Set up the agent team
+
+The agent team (`agent-team/`) runs Claude Code and Codex CLI agents as a small
+team inside one of your projects. A Producer routes each request, then plan,
+implement, and review stages run one agent at a time, handing off through files.
+Agents never commit, push, or submit; you review the result and commit it
+yourself. See [docs/AGENT_TEAM.md](docs/AGENT_TEAM.md) for the full reference.
+
+### Requirements
+
+- Python 3.11 or newer and Git. On Windows, Git for Windows also provides the
+  Git Bash shell that Claude Code uses.
+- `claude`, `codex`, or both.
+- `p4` for Perforce projects, with a working client for the project directory.
+
+The setup script installs nothing. The project launcher it writes (`team.sh`
+or `team.ps1`) installs whatever is missing the first time you run it.
+
+### 1. Seed the project
+
+On Linux or WSL:
+
+```bash
+./scripts/setup-agent-team.sh --dry-run /path/to/project
+./scripts/setup-agent-team.sh /path/to/project
+```
+
+On Windows:
+
+```powershell
+.\scripts\setup-agent-team.ps1 -TargetPath C:\path\to\project -DryRun
+.\scripts\setup-agent-team.ps1 -TargetPath C:\path\to\project
+```
+
+When it writes a new `team.toml`, setup asks two questions:
+
+- **Agents**: `claude` for Claude Code in every role, `codex` for Codex CLI in
+  every role, or `both` for mixed roles where each CLI reviews the other's
+  output.
+- **Version control**: `git`, where tasks share the working tree, or `p4`,
+  where each task gets its own Perforce changelist and agents may not use git.
+
+To skip the questions, pass `--agents claude|codex|both --vcs git|p4` (or
+`-Agents` and `-Vcs` on Windows). Without a terminal, setup uses the CLIs found
+on `PATH` and detects the VCS: git for a git repository, otherwise `p4` if it
+is installed.
+
+Setup is additive and keeps existing files. It writes:
+
+- `team.toml` with the chosen roles and VCS.
+- A project launcher: `team.sh` on Linux, `team.ps1` on Windows.
+- The `team` and `team-up` commands in `~/.local/bin`, or in the directory
+  given with `--bin-dir` / `-BinDir`. Linux gets symlinks. Windows gets
+  `team.cmd`, `team-up.cmd`, and a `team` shim for Git Bash, because Windows
+  symlinks need extra privileges.
+- For a git repository, an entry that keeps the state directory
+  (`.agent-team/`) out of git through `.git/info/exclude`. For Perforce, add
+  `.agent-team/` to your `P4IGNORE` file yourself.
+
+The agents and the coordinator need the bin directory on `PATH`. On Windows,
+setup warns when it is not. To add it for your user:
+
+```powershell
+[Environment]::SetEnvironmentVariable('Path', "$HOME\.local\bin;" + [Environment]::GetEnvironmentVariable('Path', 'User'), 'User')
+```
+
+### 2. Review `team.toml`
+
+Check the role models and effort levels, `[locks]` for exclusive resources
+such as an editor or GPU, and `[probes]` for local services the agents depend
+on. For project rules, set `templates_dir` and put them in
+`<templates_dir>/roles/common.md`. The commented template documents every
+option.
+
+### 3. Sign in to the agent CLIs
+
+Run `claude` and/or `codex` once interactively and sign in. The team uses
+those logins and never copies credentials.
+
+### 4. Start the team
+
+```bash
+cd /path/to/project
+./team.sh                        # install missing dependencies, open the dashboard
+./team.sh "add a stamina bar"    # start a task instead
+```
+
+```powershell
+cd C:\path\to\project
+.\team.ps1
+.\team.ps1 "add a stamina bar"
+```
+
+On Fedora or Debian/Ubuntu, `team.sh` installs missing packages with
+`dnf`/`apt-get`. On Windows, `team.ps1` installs Python, Git, and Node.js with
+`winget`. Both install Zellij 0.45.1 into `~/.local/bin` from its upstream
+release, verified against a pinned SHA-256, and install missing agent CLIs with
+npm. If PowerShell refuses to run local scripts, allow them for your user with
+`Set-ExecutionPolicy -Scope CurrentUser RemoteSigned`.
+
+### 5. Work with the team
+
+The Zellij dashboard shows usage, focus, the live log, and the task list, and
+has a coordinator chat where you can ask for work in plain language. The same
+actions are available as commands from the project directory:
+
+```text
+team new "add a stamina bar"     # create a task, route it, run the pipeline
+team status [id]                 # all tasks, or one task in detail
+team approve <id> ["note"]       # pass a gate, or retry after a failure
+team redo <id> "feedback"        # send the work back with feedback
+team drop <id> ["note"]          # abandon a task
+```
+
+When a task is `done`, review the working-tree diff (git) or the task's
+changelist (Perforce), then commit or submit it yourself.
+
 ## Use
 
 Start Codex normally to use the default configuration:
@@ -331,4 +448,5 @@ dependency review for pull requests.
 
 See [docs/CODEX_LAYOUT.md](docs/CODEX_LAYOUT.md) for detailed discovery and
 configuration behavior. See [docs/AGENT_TEAM.md](docs/AGENT_TEAM.md) for the
-agent team (`./scripts/setup-agent-team.sh --dry-run /path/to/project`).
+agent team reference and [Set up the agent team](#set-up-the-agent-team) for
+installation.

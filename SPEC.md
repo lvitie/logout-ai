@@ -132,8 +132,8 @@ plugin state, and runtime databases remain outside repository ownership.
 - Installing plugins without explicit opt-in.
 - Replacing project-specific `AGENTS.md` files or product requirements.
 - Installing Codex or Claude Code through the baseline installer or project
-  seeding. The explicitly invoked agent-team `team.sh` launcher may install
-  missing configured CLIs and dashboard dependencies.
+  seeding. The explicitly invoked agent-team `team.sh` and `team.ps1` launchers
+  may install missing configured CLIs and dashboard dependencies.
 - Installing CodeRabbit, RTK, local model servers, Graphify, or the Unreal MCP
   server.
 - Installing project dependencies or initializing version control as part of

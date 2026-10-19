@@ -6,8 +6,11 @@ CLI for shell scripts: `teamcfg.py --shell` prints quoted KEY=value lines (eval 
 import hashlib
 import json
 import os
+import re
 import shlex
+import shutil
 import sys
+import time
 import tomllib
 from pathlib import Path
 
@@ -152,6 +155,43 @@ def template(cfg, rel):
             return p.read_text().strip()
     p = HERE / "templates" / rel
     return p.read_text().strip() if p.is_file() else ""
+
+
+def lock(f, blocking=True):
+    """Exclusive lock on an open file, held until it is closed; non-blocking raises BlockingIOError when taken."""
+    if os.name != "nt":
+        import fcntl
+        fcntl.flock(f, fcntl.LOCK_EX | (0 if blocking else fcntl.LOCK_NB))
+        return
+    import msvcrt
+    f.seek(0)
+    while True:
+        try:
+            msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+            return
+        except OSError:
+            if not blocking:
+                raise BlockingIOError("file is locked") from None
+            time.sleep(0.1)
+
+
+def command(argv, path=None):
+    """argv with the program resolved on PATH. On Windows an npm .cmd shim is bypassed for its node script, because
+    cmd.exe re-parses the arguments (quotes, |, &) and cuts them at the first newline."""
+    exe = shutil.which(argv[0], path=path)
+    if not exe:
+        return list(argv)
+    if os.name == "nt" and exe.lower().endswith(".cmd"):
+        try:
+            m = re.search(r'"%dp0%\\([^"]+\.js)"', Path(exe).read_text(errors="ignore"))
+        except OSError:
+            m = None
+        base = Path(exe).parent
+        node = base / "node.exe" if (base / "node.exe").is_file() else shutil.which("node", path=path)
+        script = base / m.group(1).replace("\\", "/") if m else None
+        if script and node and script.is_file():
+            return [str(node), str(script), *argv[1:]]
+    return [exe, *argv[1:]]
 
 
 def change_noun(cfg):

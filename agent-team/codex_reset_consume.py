@@ -7,7 +7,6 @@ No automatic invocation. Reads usage_tui --json --fresh-codex, never stale data.
 Protocol: https://developers.openai.com/codex/app-server (local JSON schema for consume).
 """
 import argparse
-import fcntl
 import importlib.machinery
 import importlib.util
 import json
@@ -43,6 +42,8 @@ def atomic_json(path, value):
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, path)
+        if os.name == "nt":  # directories cannot be opened for fsync on Windows
+            return
         fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
         try:
             os.fsync(fd)
@@ -177,7 +178,7 @@ def main(argv=None):
         STATE.parent.mkdir(parents=True, exist_ok=True)
         with STATE.with_suffix(".json.lock").open("a") as lock:
             try:
-                fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                teamcfg.lock(lock, blocking=False)
             except BlockingIOError:
                 raise Refused("another reset attempt is running") from None
             code, message = attempt(args.limit_hit)

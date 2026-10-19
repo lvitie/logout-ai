@@ -1,26 +1,46 @@
-#!/usr/bin/env bash
-# Agent team dashboard for the project that owns team.toml (found via $TEAM_CONFIG or the current directory upwards).
-# No args: open or reattach the zellij session. With a request: start a task.
-#   team-up
-#   team-up "add a stamina bar to the HUD"
-set -euo pipefail
-here="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
-eval "$(python3 "$here/teamcfg.py" --shell)"
-export TEAM_CONFIG PATH="$here/bin:$PATH"
-cd "$TEAM_ROOT"
-mkdir -p "$TEAM_STATE" && touch "$TEAM_STATE/live.log"
+#!/usr/bin/env python3
+"""Agent team dashboard for the project that owns team.toml (found via $TEAM_CONFIG or the current directory upwards).
+No args: open or reattach the zellij session. With a request: start a task.
+  team-up
+  team-up "add a stamina bar to the HUD"
+"""
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
 
-if [[ $# -gt 0 ]]; then
-  exec team new "$*"
-fi
-session="${TEAM_NAME}-team"
-layout="$TEAM_STATE/team.kdl"
-sed "s#@@AGENT_TEAM@@#$here#g" "$here/templates/team.kdl" >"$layout"
-if [[ -n ${ZELLIJ:-} ]]; then
-  exec zellij action new-tab --layout "$layout" --name team
-fi
-if zellij list-sessions --no-formatting 2>/dev/null | grep "^$session " | grep -qv EXITED; then
-  exec zellij attach "$session"
-fi
-zellij delete-session "$session" >/dev/null 2>&1 || true # drop an exited session so the layout is fresh
-exec zellij --session "$session" --new-session-with-layout "$layout"
+here = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(here))
+import teamcfg  # noqa: E402
+
+
+def run(argv):
+    if os.name == "nt":  # exec on Windows starts a new process and returns at once; wait to keep the exit code
+        sys.exit(subprocess.run(argv).returncode)
+    os.execvp(argv[0], argv)
+
+
+cfg = teamcfg.load()
+os.environ["TEAM_CONFIG"] = cfg["config_path"]
+os.environ["PATH"] = str(here / "bin") + os.pathsep + os.environ.get("PATH", "")
+os.environ.setdefault("PYTHONUTF8", "1")  # panes read and print agent output; Windows defaults to a legacy code page
+os.chdir(cfg["root"])
+cfg["state"].mkdir(parents=True, exist_ok=True)
+(cfg["state"] / "live.log").touch()
+
+if sys.argv[1:]:
+    run([sys.executable, str(here / "team.py"), "new", " ".join(sys.argv[1:])])
+if not shutil.which("zellij"):
+    sys.exit("team-up: zellij is not on PATH")
+session = f"{cfg['project']['name']}-team"
+layout = cfg["state"] / "team.kdl"
+layout.write_text((here / "templates/team.kdl").read_text().replace("@@AGENT_TEAM@@", here.as_posix())
+                  .replace("@@PYTHON@@", Path(sys.executable).as_posix()))
+if os.environ.get("ZELLIJ"):
+    run(["zellij", "action", "new-tab", "--layout", str(layout), "--name", "team"])
+listed = subprocess.run(["zellij", "list-sessions", "--no-formatting"], capture_output=True, text=True).stdout
+if any(line.startswith(f"{session} ") and "EXITED" not in line for line in listed.splitlines()):
+    run(["zellij", "attach", session])
+subprocess.run(["zellij", "delete-session", session], capture_output=True)  # drop an exited session: fresh layout
+run(["zellij", "--session", session, "--new-session-with-layout", str(layout)])

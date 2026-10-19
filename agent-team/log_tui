@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Readable live.log: per-agent colours, tool calls as one dim line (like the Claude Code TUI), messages wrapped."""
-import os, re, shutil, subprocess, sys, textwrap
+import os, re, shutil, sys, textwrap
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import teamcfg
 LIVE = str(teamcfg.load()["state"] / "live.log")
@@ -50,16 +50,32 @@ def feed(lines):
         sys.stdout.flush()
     return cur
 
+def follow(path, keep=400, idle=0.7):
+    """Like `tail -n keep -F path`: whole lines, then None each time nothing new arrived for `idle` seconds."""
+    import collections, time
+    while not os.path.exists(path):
+        time.sleep(idle)
+    with open(path, errors="ignore") as f:
+        yield from collections.deque(f, keep)
+        part = ""
+        while True:
+            line = f.readline()
+            if line:
+                part += line
+                if part.endswith("\n"):
+                    yield part
+                    part = ""
+                continue
+            if os.path.getsize(path) < f.tell():  # truncated: start over
+                f.seek(0)
+                continue
+            yield None
+            time.sleep(idle)
+
 if __name__ == "__main__":
-    p = subprocess.Popen(["tail", "-n", "400", "-F", LIVE], stdout=subprocess.PIPE, text=True, errors="ignore", bufsize=1)
-    pending, last = None, None
-    import select, time
     cur = None
-    while True:
-        r, _, _ = select.select([p.stdout], [], [], 0.7)
-        if r:
-            raw = p.stdout.readline()
-            if not raw: break
+    for raw in follow(LIVE):
+        if raw is not None:
             raw = raw.rstrip("\n"); m = HEAD.match(raw)
             if m:
                 if cur: emit(cur)

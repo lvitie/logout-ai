@@ -7,11 +7,12 @@ dry_run=false
 target_path=""
 bin_dir="${HOME}/.local/bin"
 agents=""
+vcs=""
 added_count=0
 skipped_count=0
 
 usage() {
-  printf 'usage: %s [--dry-run] [--bin-dir DIR] [--agents claude|codex|both] [--] PROJECT_PATH\n' "$(basename "$0")"
+  printf 'usage: %s [--dry-run] [--bin-dir DIR] [--agents claude|codex|both] [--vcs git|p4] [--] PROJECT_PATH\n' "$(basename "$0")"
 }
 
 fail() {
@@ -80,33 +81,47 @@ ask_agents() {
   done
 }
 
-# Writes the template with the project name and the role preset for the chosen agents.
-write_config() {
-  python3 -I -c '
-import sys
-from pathlib import Path
+# git for an existing git repository, else Perforce when p4 is installed, else git.
+detected_vcs() {
+  if git -C "$target_path" rev-parse --git-dir >/dev/null 2>&1; then
+    printf 'git\n'
+  elif command -v p4 >/dev/null 2>&1; then
+    printf 'p4\n'
+  else
+    printf 'git\n'
+  fi
+}
 
-src, dst, name, agents = sys.argv[1:]
-CLAUDE = {"producer": ("claude", "claude-sonnet-5-5", "low"), "mid": ("claude", "claude-sonnet-5-5", "medium"),
-          "senior": ("claude", "claude-opus-5-5", "high"), "architect": ("claude", "claude-opus-5-5", "high"),
-          "director": ("claude", "claude-opus-5-5", "high")}
-CODEX = {"producer": ("codex", "gpt-6.1-sol", "low"), "mid": ("codex", "gpt-6.1-sol", "medium"),
-         "senior": ("codex", "gpt-6.1-sol", "high"), "architect": ("codex", "gpt-6-astra", "high"),
-         "director": ("codex", "gpt-6-astra", "high")}
-# Codex implements simple and complex work and Claude reviews it; hard work is planned by Codex, built by Claude.
-BOTH = {"producer": CLAUDE["producer"], "mid": CODEX["mid"], "senior": CLAUDE["senior"],
-        "architect": CLAUDE["architect"], "director": CODEX["director"]}
-NAMES = {"producer": "Producer", "mid": "Mid Dev", "senior": "Senior Dev", "architect": "Architect",
-         "director": "Tech Director"}
-preset = {"claude": CLAUDE, "codex": CODEX, "both": BOTH}[agents]
-roles = "".join(f"[roles.{k}]\nname = \"{NAMES[k]}\"\ncli = \"{c}\"\nmodel = \"{m}\"\neffort = \"{e}\"\n"
-                for k, (c, m, e) in preset.items())
-text = Path(src).read_text()
-start = text.index("\n", text.index("# --- roles:")) + 1
-end = text.index("# --- end roles ---")
-text = text[:start] + roles + text[end:]
-Path(dst).write_text(text.replace("name = \"myproject\"", f"name = \"{name}\"", 1))
-' "$@"
+ask_vcs() {
+  local default reply
+
+  default="$(detected_vcs)"
+  if [[ ! -t 0 ]]; then
+    vcs="$default"
+    printf 'vcs: %s (detected; pass --vcs to choose)\n' "$vcs"
+    return
+  fi
+
+  printf 'Which version control does the project use?\n'
+  printf '  1) git  tasks share the working tree; agents never stage or commit\n'
+  printf '  2) p4   Perforce: each task gets its own changelist; agents never submit\n'
+  while true; do
+    read -r -p "Choice [$default]: " reply || reply=""
+    case "${reply:-$default}" in
+      1 | git) vcs=git ;;
+      2 | p4 | perforce) vcs=p4 ;;
+      *)
+        printf 'enter 1, 2, git or p4\n'
+        continue
+        ;;
+    esac
+    break
+  done
+}
+
+# Writes the template with the project name, the role preset for the chosen agents and the VCS.
+write_config() {
+  python3 -I "$team_root/write_config.py" "$@"
 }
 
 # Keeps the state dir out of `git add -A` when the project is already a git repository.
@@ -175,6 +190,14 @@ while (($# > 0)); do
       esac
       shift 2
       ;;
+    --vcs)
+      (($# >= 2)) || fail "--vcs requires git or p4"
+      case "$2" in
+        git | p4) vcs="$2" ;;
+        *) fail "--vcs must be git or p4" ;;
+      esac
+      shift 2
+      ;;
     --help | -h)
       usage
       exit 0
@@ -226,22 +249,30 @@ else
   [[ "$project_name" != "." ]] && project_name="$(basename "$(cd "$target_path" 2>/dev/null && pwd -P || printf '%s' "$target_path")")"
   project_name="${project_name//[^A-Za-z0-9._-]/-}"
   [[ -n "$agents" ]] || ask_agents
+  [[ -n "$vcs" ]] || ask_vcs
   for cli in claude codex; do
     if [[ "$agents" == "$cli" || "$agents" == both ]] && ! command -v "$cli" >/dev/null 2>&1; then
       printf 'warning: %s is not on PATH; install it before running the team\n' "$cli" >&2
     fi
   done
+  if [[ "$vcs" == p4 ]] && ! command -v p4 >/dev/null 2>&1; then
+    printf 'warning: p4 is not on PATH; install the Perforce CLI before running the team\n' >&2
+  fi
   if $dry_run; then
-    printf '+ write %q (name=%s, agents=%s)\n' "$config" "$project_name" "$agents"
+    printf '+ write %q (name=%s, agents=%s, vcs=%s)\n' "$config" "$project_name" "$agents" "$vcs"
   else
-    write_config "$team_root/templates/team.toml" "$config" "$project_name" "$agents"
+    write_config "$team_root/templates/team.toml" "$config" "$project_name" "$agents" "$vcs"
   fi
   printf 'added: %s\n' "$config"
   added_count=$((added_count + 1))
 fi
 
 state_hint=", add .agent-team/ to the project ignore list"
-exclude_state_dir && state_hint=""
+if [[ "$vcs" == p4 ]]; then
+  state_hint=", add .agent-team/ to the project's P4IGNORE file"
+elif exclude_state_dir; then
+  state_hint=""
+fi
 
 launcher="$target_path/team.sh"
 if [[ -e "$launcher" || -L "$launcher" ]]; then

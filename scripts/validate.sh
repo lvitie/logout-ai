@@ -45,7 +45,9 @@ required_files=(
   "agent-team/bin/vcs-guard"
   "agent-team/hooks/vcs_open.py"
   "agent-team/templates/team.toml"
+  "agent-team/write_config.py"
   "agent-team/templates/team.sh"
+  "agent-team/templates/team.ps1"
   "agent-team/templates/team.kdl"
   "agent-team/templates/roles/common.md"
   "agent-team/templates/jobs/route.md"
@@ -55,7 +57,9 @@ required_files=(
   "examples/unreal-p4/team.toml"
   "docs/AGENT_TEAM.md"
   "scripts/setup-agent-team.sh"
+  "scripts/setup-agent-team.ps1"
   "scripts/test-setup-agent-team.sh"
+  "scripts/test-setup-agent-team.ps1"
 )
 
 for relative in "${required_files[@]}"; do
@@ -86,7 +90,7 @@ if command -v python3 >/dev/null 2>&1; then
       "$repo_root/agent-team" "$team_config" || fail "invalid agent team config ${team_config#"$repo_root"/}"
   done
 
-  # The coordinator needs Linux (/proc); its config is still checked everywhere.
+  # The unit tests use Linux fakes (sh scripts, symlinks); the config is still checked everywhere.
   if [[ "$(uname -s)" == Linux ]]; then
     python3 -I -B -m unittest discover "$repo_root/agent-team/tests" >/dev/null 2>&1 ||
       fail "agent team unit tests failed (run: python3 -I -m unittest discover agent-team/tests)"
@@ -153,8 +157,6 @@ if ! bash -n \
   "$repo_root/scripts/setup-agent-team.sh" \
   "$repo_root/scripts/test-setup-agent-team.sh" \
   "$repo_root/agent-team/bin/team" \
-  "$repo_root/agent-team/bin/team-up" \
-  "$repo_root/agent-team/chat" \
   "$repo_root/agent-team/templates/team.sh" \
   "$repo_root/agent-team/notify" \
   "$repo_root/agent-team/notifier" \
@@ -171,8 +173,6 @@ if command -v shellcheck >/dev/null 2>&1; then
     "$repo_root/scripts/setup-agent-team.sh" \
     "$repo_root/scripts/test-setup-agent-team.sh" \
     "$repo_root/agent-team/bin/team" \
-    "$repo_root/agent-team/bin/team-up" \
-    "$repo_root/agent-team/chat" \
     "$repo_root/agent-team/templates/team.sh" \
     "$repo_root/agent-team/notify" \
     "$repo_root/agent-team/notifier" \
@@ -198,7 +198,10 @@ if command -v pwsh >/dev/null 2>&1; then
     "$repo_root/scripts/install.ps1" \
     "$repo_root/scripts/setup-project.ps1" \
     "$repo_root/scripts/test-install.ps1" \
-    "$repo_root/scripts/test-setup-project.ps1"; do
+    "$repo_root/scripts/test-setup-project.ps1" \
+    "$repo_root/scripts/setup-agent-team.ps1" \
+    "$repo_root/scripts/test-setup-agent-team.ps1" \
+    "$repo_root/agent-team/templates/team.ps1"; do
     # The PowerShell variables must not expand in Bash.
     # shellcheck disable=SC2016
     LOGOUT_AI_POWERSHELL_FILE="$powershell_file" pwsh -NoProfile -Command \

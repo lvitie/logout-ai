@@ -101,6 +101,49 @@ class Project(unittest.TestCase):
         self.team("drop", "t002", "not needed")
         self.assertIn("dropped", self.team("status", "t002").stdout)
 
+    def test_run_lock_blocks_drop_and_second_run(self):
+        self.team("new", "--no-run", "busy")
+        with (self.proj / ".agent-team/t001/.lock-run").open("a") as held:
+            teamcfg.lock(held, blocking=False)  # stands in for the process advancing t001
+            self.assertIn("is running", self.team("drop", "t001", ok=False).stderr)
+            self.assertIn("already running", self.team("run", "t001", ok=False).stderr)
+        self.team("drop", "t001")
+
+    def test_windows_shims(self):
+        """npm .cmd shims are bypassed for their node script; guard names get .cmd and sh shims, not symlinks."""
+        from types import SimpleNamespace
+        from unittest import mock
+        nt = SimpleNamespace(name="nt")  # only os.name is read on these paths; pathlib keeps the host flavour
+        bindir = Path(self.tmp.name) / "npm"
+        script = bindir / "node_modules/@openai/codex/bin/codex.js"
+        script.parent.mkdir(parents=True)
+        script.write_text("")
+        (bindir / "node.exe").write_text("")
+        shim = bindir / "codex.cmd"
+        shim.write_text('@ECHO off\r\nendLocal & goto #_undefined_# 2>NUL || title %COMSPEC% & "%_prog%"  '
+                        '"%dp0%\\node_modules\\@openai\\codex\\bin\\codex.js" %*\r\n')
+        with mock.patch.object(teamcfg, "os", nt), mock.patch.object(teamcfg.shutil, "which", return_value=str(shim)):
+            argv = teamcfg.command(["codex", "exec", "line one\nline two"])
+        self.assertEqual(argv[0], str(bindir / "node.exe"))
+        self.assertEqual(Path(argv[1].replace("\\", "/")), script)
+        self.assertEqual(argv[2:], ["exec", "line one\nline two"])
+        (bindir / "plain.cmd").write_text("@exit /b 99\r\n")
+        with mock.patch.object(teamcfg, "os", nt), mock.patch.object(teamcfg.shutil, "which", return_value=str(bindir / "plain.cmd")):
+            self.assertEqual(teamcfg.command(["plain", "x"]), [str(bindir / "plain.cmd"), "x"])
+
+        import team
+        team.init(self.proj / "team.toml")
+        with mock.patch.object(team, "os", nt):
+            team.ensure_guards()
+        guard = self.proj / ".agent-team/guard-bin"
+        self.assertFalse((guard / "git").is_symlink())
+        self.assertIn('set "TEAM_GUARD_TOOL=git"', (guard / "git.cmd").read_text())
+        self.assertIn("vcs-guard", (guard / "git").read_text())
+        sh = subprocess.run(["sh", str(guard / "git"), "commit", "-qm", "x"], cwd=self.proj, env=self.env,
+                            capture_output=True, text=True, timeout=10)
+        self.assertIn("not allowed", sh.stderr)
+        self.assertEqual(self.git("rev-list", "--count", "HEAD").strip(), "1")
+
     def test_guard_denies_and_forwards(self):
         self.team("new", "--no-run", "x")
         guard = self.proj / ".agent-team/guard-bin"

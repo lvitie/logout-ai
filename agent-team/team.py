@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 """Agent team coordinator: runs Claude and Codex agents one at a time per task. Config: team.toml (see docs/AGENT_TEAM.md)."""
 import argparse
-import fcntl
 import json
 import math
 import os
@@ -55,13 +54,22 @@ def _clean_path():
 
 
 def ensure_guards():
-    """Symlink vcs-guard under each [vcs].guard_names entry; those names shadow the real tools for agents."""
+    """Symlink vcs-guard under each [vcs].guard_names entry; those names shadow the real tools for agents. Windows
+    symlinks need extra privileges, so there each name gets a .cmd shim (PowerShell, cmd) and an sh one (Git Bash)."""
     _guard_dir().mkdir(parents=True, exist_ok=True)
+    guard = HERE / "bin/vcs-guard"
     for name in CFG["vcs"]["guard_names"]:
         link = _guard_dir() / name
         if link.is_symlink() or link.exists():
             link.unlink()
-        link.symlink_to(HERE / "bin/vcs-guard")
+        if os.name != "nt":
+            link.symlink_to(guard)
+            continue
+        py = Path(sys.executable)
+        link.write_text(f'#!/bin/sh\nTEAM_GUARD_TOOL={name} exec "{py.as_posix()}" -X utf8 "{guard.as_posix()}" "$@"\n',
+                        newline="\n")
+        (_guard_dir() / f"{name}.cmd").write_text(
+            f'@echo off\nsetlocal\nset "TEAM_GUARD_TOOL={name}"\n"{py}" -X utf8 "{guard}" %*\nexit /b %errorlevel%\n')
 
 
 def noun():
@@ -269,7 +277,7 @@ def deny_rules():
 
 def agent_cmd(cli, model, effort, readonly, out):
     if cli == "claude":
-        hook = f"{sys.executable} {HERE / 'hooks/vcs_open.py'}"
+        hook = f'"{Path(sys.executable).as_posix()}" "{(HERE / "hooks/vcs_open.py").as_posix()}"'
         settings = {
             "hooks": {
                 "PreToolUse": [{"matcher": "Edit|Write|MultiEdit|NotebookEdit",
@@ -292,6 +300,9 @@ def agent_cmd(cli, model, effort, readonly, out):
 
 def reap(pid):
     """Kill an agent's leftover child processes, then the agent, once its result has been delivered."""
+    if os.name == "nt":
+        subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, check=False)
+        return
     subprocess.run(["pkill", "-TERM", "-P", str(pid)], check=False)
     time.sleep(5)
     try:
@@ -366,7 +377,7 @@ def route_mode(u):
     exp = sorted(e for e in exp if e > 0)  # expired / bogus entries ignored
     MODE.parent.mkdir(parents=True, exist_ok=True)
     with ROUTE_LOCK.open("a") as lk:
-        fcntl.flock(lk, fcntl.LOCK_EX)  # prev read, history append and mode write form one critical section
+        teamcfg.lock(lk)  # prev read, history append and mode write form one critical section
         now = time.time()
         keep = [r for r in _hist_rows() if now - r[0] < HIST_KEEP_S] + [(now, float(c7), float(x7))]
         _atomic_write(HIST, "".join(json.dumps({"t": t, "c7": a, "x7": b}) + "\n" for t, a, b in keep))
@@ -534,7 +545,7 @@ def _run_agent_once(s, kind, role, *, selection=None):
             env[f"TEAM_REAL_{tool.upper()}"] = real
         else:
             env.pop(f"TEAM_REAL_{tool.upper()}", None)
-    cmd = agent_cmd(cli, model, effort, kind != "implement", out)
+    cmd = teamcfg.command(agent_cmd(cli, model, effort, kind != "implement", out), path=env["PATH"])
 
     live(f"[{s['id']}] {name} ({model}, {effort}): {kind}")
     final = None
@@ -645,20 +656,24 @@ def advance(s):
     held = []
     try:
         for name in [f"slot{i}" for i in range(MAX_PARALLEL)]:  # global concurrency cap
-            f = (RUNS / f".lock-{name}").open("w")
+            f = (RUNS / f".lock-{name}").open("a")
             try:
-                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                teamcfg.lock(f, blocking=False)
                 held.append(f)
                 break
             except BlockingIOError:
                 f.close()
         else:
             sys.exit(f"{MAX_PARALLEL} team runs are already in progress.")
+        f = run_lock(s["id"])
+        if not f:
+            sys.exit(f"{s['id']} is already running.")
+        held.append(f)
         res = [r for r in res if r != "none"]
         for r in res:
-            f = (RUNS / f".lock-{r}").open("w")
+            f = (RUNS / f".lock-{r}").open("a")
             try:
-                fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                teamcfg.lock(f, blocking=False)
             except BlockingIOError:
                 sys.exit(f"Resource '{r}' is busy with another team run.")
             held.append(f)
@@ -691,6 +706,17 @@ def advance(s):
         for f in held:
             f.close()
     live(f"[{s['id']}] {s['status']}: {s['reason']}")
+
+
+def run_lock(tid):
+    """The task's run lock as an open file, held by the process advancing it; None when another process holds it."""
+    f = (task_dir(tid) / ".lock-run").open("a")
+    try:
+        teamcfg.lock(f, blocking=False)
+        return f
+    except BlockingIOError:
+        f.close()
+        return None
 
 
 def stage_label(s):
@@ -744,17 +770,10 @@ def cmd_approve(a):
 
 def cmd_drop(a):
     s = load(a.id)
-    live_run = False
-    for p in os.listdir("/proc"):
-        if p.isdigit() and p != str(os.getpid()) and os.access(f"/proc/{p}/cmdline", os.R_OK):
-            try:
-                line = " ".join(open(f"/proc/{p}/cmdline").read().split("\0"))
-            except OSError:
-                continue
-            if any(f"team.py {c} {a.id}" in line or f"team {c} {a.id}" in line for c in ("new", "run", "approve", "redo")):
-                live_run = True
-    if s["status"] == "running" and live_run:
+    f = run_lock(a.id)
+    if not f:
         sys.exit(f"{a.id} is running; stop it first.")
+    f.close()
     s["notes"].append("Dropped by the user" + (f": {a.note}" if a.note else ""))
     s["status"], s["reason"] = "dropped", a.note or "dropped"
     s["finished"] = time.time()

@@ -6,6 +6,7 @@ boundary: an agent can still call the real binary by path."""
 import os
 import shlex
 import shutil
+import subprocess
 import sys
 from pathlib import Path
 
@@ -13,13 +14,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import teamcfg  # noqa: E402
 import vcs  # noqa: E402
 
-tool = Path(sys.argv[0]).name
+tool = os.environ.pop("TEAM_GUARD_TOOL", "") or Path(sys.argv[0]).name  # set by the Windows shims
 argv = sys.argv[1:]
 me = os.path.realpath(__file__)
 real = os.environ.get(f"TEAM_REAL_{tool.upper()}")
-if not real:  # first match on PATH that is not this guard under any spelling
+if not real:  # first match on PATH that is not this guard under any spelling (or a Windows shim next to it)
     real = next((c for d in os.environ.get("PATH", "").split(os.pathsep)
-                 if d and (c := shutil.which(tool, path=d)) and os.path.realpath(c) != me), None)
+                 if d and (c := shutil.which(tool, path=d)) and os.path.realpath(c) != me
+                 and Path(os.path.realpath(c)).parent.name != "guard-bin"), None)
 if not real:
     sys.exit(f"agent team: real {tool} not found")
 
@@ -52,4 +54,6 @@ while True:
     seen.add(sub)
     words = shlex.split(expansion)
     sub, rest = (words[0], words[1:] + rest) if words else ("", rest)
+if os.name == "nt":  # exec on Windows starts a new process and returns at once; wait to keep the exit code
+    sys.exit(subprocess.run([real, *argv]).returncode)
 os.execv(real, [real, *argv])

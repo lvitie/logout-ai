@@ -1,21 +1,28 @@
-#!/usr/bin/env bash
-# Coordinator chat: an interactive session using the configured Producer CLI.
-set -euo pipefail
-here="$(dirname "$(readlink -f "$0")")"
-config_env="$(python3 "$here/teamcfg.py" --shell)"
-eval "$config_env"
-export TEAM_CONFIG PATH="$here/bin:$PATH"
-cd "$TEAM_ROOT" || exit 1
-prompt="$(python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import teamcfg; c = teamcfg.load(); print(teamcfg.template(c, "roles/coordinator.md").replace("{project}", c["project"]["name"]).replace("{state_dir}", c["project"]["state_dir"]))' "$here")"
-case "$TEAM_PRODUCER_CLI" in
-  codex)
-    instructions="$(printf '%s' "$prompt" | python3 -c 'import json, sys; print(json.dumps(sys.stdin.read()))')"
-    exec codex --model "$TEAM_PRODUCER_MODEL" \
-      -c "model_reasoning_effort=\"$TEAM_PRODUCER_EFFORT\"" \
-      -c "developer_instructions=$instructions" "$@"
-    ;;
-  claude)
-    exec claude --model "$TEAM_PRODUCER_MODEL" --effort "$TEAM_PRODUCER_EFFORT" -n "$TEAM_NAME team" \
-      --append-system-prompt "$prompt" "$@"
-    ;;
-esac
+#!/usr/bin/env python3
+"""Coordinator chat: an interactive session using the configured Producer CLI."""
+import json
+import os
+import subprocess
+import sys
+
+here = os.path.dirname(os.path.realpath(__file__))
+sys.path.insert(0, here)
+import teamcfg  # noqa: E402
+
+cfg = teamcfg.load()
+producer, name = cfg["roles"]["producer"], cfg["project"]["name"]
+os.environ["TEAM_CONFIG"] = cfg["config_path"]
+os.environ["PATH"] = os.path.join(here, "bin") + os.pathsep + os.environ.get("PATH", "")
+os.chdir(cfg["root"])
+prompt = (teamcfg.template(cfg, "roles/coordinator.md").replace("{project}", name)
+          .replace("{state_dir}", cfg["project"]["state_dir"]))
+if producer["cli"] == "codex":
+    argv = ["codex", "--model", producer["model"], "-c", f'model_reasoning_effort="{producer["effort"]}"',
+            "-c", f"developer_instructions={json.dumps(prompt)}"]
+else:
+    argv = ["claude", "--model", producer["model"], "--effort", producer["effort"], "-n", f"{name} team",
+            "--append-system-prompt", prompt]
+argv = teamcfg.command(argv + sys.argv[1:])
+if os.name == "nt":  # exec on Windows starts a new process and returns at once; wait to keep the exit code
+    sys.exit(subprocess.run(argv).returncode)
+os.execvp(argv[0], argv)

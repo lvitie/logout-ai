@@ -23,6 +23,15 @@
   tests, setup integration, repository validation and independent review;
   actual x86_64 Zellij 0.45.1 download, SHA-256 and version check passed.
   Interactive dashboard and real agent tasks remain outside these checks.
+- [x] Make the coordinator Windows compatible: portable locks and process
+  cleanup, Python `team-up` and `chat`, Windows guard shims, `setup-agent-team.ps1`
+  and a `team.ps1` launcher (winget, pinned Zellij 0.45.1 Windows zip). Verified on
+  Linux with 46 unit tests (one pre-existing launcher test needs node/npm on PATH),
+  setup integration, full validation with ShellCheck and pwsh parsing, a real Zellij
+  session from the new layout, and the PowerShell setup run under pwsh on Linux.
+- [ ] Run `scripts/test-setup-agent-team.ps1` on Windows CI and `team.ps1` on a real
+  Windows machine.
+- [x] Ask for git or p4 during setup (`--vcs`/`-Vcs`, detected without a terminal).
 
 ## Next phase: Enforced repository governance
 

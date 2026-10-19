@@ -1,17 +1,27 @@
-// Rendered by team-up (bin/team-up) into <state_dir>/team.kdl; @@AGENT_TEAM@@ is the agent-team directory.
-// Panes inherit TEAM_CONFIG and the project root as working directory.
+// Rendered by team-up (bin/team-up) into <state_dir>/team.kdl; @@AGENT_TEAM@@ is the agent-team directory and
+// @@PYTHON@@ the interpreter running team-up. Panes inherit TEAM_CONFIG and the project root as working directory.
 layout {
     pane split_direction="vertical" {
         pane split_direction="horizontal" size="55%" {
             pane size=12 split_direction="vertical" {
-                pane name="usage" command="@@AGENT_TEAM@@/usage_tui"
-                pane size="42%" name="focus" command="@@AGENT_TEAM@@/focus_tui"
+                pane name="usage" command="@@PYTHON@@" {
+                    args "@@AGENT_TEAM@@/usage_tui"
+                }
+                pane size="42%" name="focus" command="@@PYTHON@@" {
+                    args "@@AGENT_TEAM@@/focus_tui"
+                }
             }
-            pane name="live log" command="@@AGENT_TEAM@@/log_tui"
+            pane name="live log" command="@@PYTHON@@" {
+                args "@@AGENT_TEAM@@/log_tui"
+            }
         }
         pane split_direction="horizontal" {
-            pane size="40%" name="tasks" command="@@AGENT_TEAM@@/tasks_tui"
-            pane name="coordinator" focus=true command="@@AGENT_TEAM@@/chat"
+            pane size="40%" name="tasks" command="@@PYTHON@@" {
+                args "@@AGENT_TEAM@@/tasks_tui"
+            }
+            pane name="coordinator" focus=true command="@@PYTHON@@" {
+                args "@@AGENT_TEAM@@/chat"
+            }
         }
     }
 }

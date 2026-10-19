@@ -22,7 +22,7 @@ dry_output="$("$repo_root/scripts/setup-agent-team.sh" --dry-run --bin-dir "$bin
 grep -q 'dry run complete' <<<"$dry_output" || fail "dry run did not finish"
 [[ ! -e "$project" && ! -e "$bin" ]] || fail "dry run created files"
 
-"$repo_root/scripts/setup-agent-team.sh" --bin-dir "$bin" "$project" >/dev/null
+"$repo_root/scripts/setup-agent-team.sh" --vcs git --bin-dir "$bin" "$project" >/dev/null
 [[ -f "$project/team.toml" ]] || fail "team.toml was not created"
 [[ -x "$project/team.sh" ]] || fail "team.sh was not created or is not executable"
 bash -n "$project/team.sh" || fail "team.sh has invalid syntax"
@@ -46,12 +46,24 @@ fi
 if "$repo_root/scripts/setup-agent-team.sh" --agents gemini "$tmp/other" >/dev/null 2>&1; then
   fail "unknown --agents value accepted"
 fi
+if "$repo_root/scripts/setup-agent-team.sh" --vcs svn "$tmp/other" >/dev/null 2>&1; then
+  fail "unknown --vcs value accepted"
+fi
+
+# Perforce: the p4 adapter and guard are configured and no git exclude entry is written.
+git init -q "$tmp/repo-p4"
+"$repo_root/scripts/setup-agent-team.sh" --agents claude --vcs p4 --bin-dir "$bin" "$tmp/repo-p4" >/dev/null 2>&1
+vcs_kind="$(python3 -I -c 'import sys; sys.path.insert(0, sys.argv[1]); import teamcfg
+c = teamcfg.load(sys.argv[2])["vcs"]; print(c["kind"], *c["guard_names"], *c["deny"]["git"])' \
+  "$repo_root/agent-team" "$tmp/repo-p4/team.toml")" || fail "p4 preset does not load"
+[[ "$vcs_kind" == "p4 p4 git *" ]] || fail "p4 preset has vcs: $vcs_kind"
+! grep -qxF '/.agent-team/' "$tmp/repo-p4/.git/info/exclude" || fail "git exclude written for a p4 project"
 
 # Each preset loads and uses the chosen CLIs; an existing repo gets the state dir excluded once.
 for agents in claude codex both; do
   repo="$tmp/repo-$agents"
   git init -q "$repo"
-  "$repo_root/scripts/setup-agent-team.sh" --agents "$agents" --bin-dir "$bin" "$repo" >/dev/null 2>&1
+  "$repo_root/scripts/setup-agent-team.sh" --agents "$agents" --vcs git --bin-dir "$bin" "$repo" >/dev/null 2>&1
   clis="$(python3 -I -c 'import sys; sys.path.insert(0, sys.argv[1]); import teamcfg
 print(" ".join(sorted({r["cli"] for r in teamcfg.load(sys.argv[2])["roles"].values()})))' \
     "$repo_root/agent-team" "$repo/team.toml")" || fail "$agents preset does not load"

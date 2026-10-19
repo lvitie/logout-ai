@@ -26,7 +26,7 @@ def command(args):
         return None
 
 def team_rows():
-    out = command([os.path.join(HERE, "bin/team"), "status", "-r"])
+    out = command([sys.executable, os.path.join(HERE, "team.py"), "status", "-r"])
     if out is None:
         return None
     rows = []

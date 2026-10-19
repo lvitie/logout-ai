@@ -13,7 +13,7 @@ ROW_NEW = re.compile(r"^(t\d+)\s+(\S+)\s+chg:(\S+)\s+(.*)$")
 
 def draw():
     w = max(40, shutil.get_terminal_size((100, 30))[0])
-    raw = subprocess.run([os.path.join(HERE, "bin/team"), "status", "-r"], capture_output=True, text=True, cwd=WS).stdout
+    raw = subprocess.run([sys.executable, os.path.join(HERE, "team.py"), "status", "-r"], capture_output=True, text=True, cwd=WS).stdout
     tasks, cur = [], None
     for l in raw.splitlines():
         m = ROW.match(l)

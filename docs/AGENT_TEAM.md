@@ -4,9 +4,11 @@ A project-agnostic coordinator that runs Claude Code and Codex CLI agents as a s
 task, then plan / implement / review stages run one agent at a time per task, with hand-offs as files. Extracted
 from a larger game project; everything project-specific lives in one `team.toml` plus optional templates.
 
-Requirements: Linux, Python 3.11 or newer (`tomllib`), `claude` and/or `codex` on `PATH`, `git` (or another
-adapter). `zellij` for the dashboard. The coordinator uses `fcntl` locks and `/proc`, so it runs on Linux only;
-`scripts/validate.sh` skips its tests elsewhere. Nothing here is installed by `scripts/install.sh`; use the setup script below.
+Requirements: Linux or Windows, Python 3.11 or newer (`tomllib`), `claude` and/or `codex` on `PATH`, `git` (or `p4`,
+or another adapter). `zellij` for the dashboard. Locks use `fcntl` on Linux and `msvcrt` on Windows. The unit tests
+use Linux fakes, so `scripts/validate.sh` runs them on Linux only; Windows CI runs `scripts/test-setup-agent-team.ps1`.
+Desktop notifications (`notifier`, `notify`) need `notify-send` and stay Linux-only. Nothing here is installed by
+`scripts/install.sh`; use the setup script below. The README has a step-by-step setup guide.
 
 ## Install
 
@@ -15,18 +17,34 @@ adapter). `zellij` for the dashboard. The coordinator uses `fcntl` locks and `/p
 ./scripts/setup-agent-team.sh /path/to/project
 ```
 
-The script is additive. It writes `team.toml` and an executable `team.sh` into the project (kept if present) and links `team` and `team-up`
-into `~/.local/bin` (`--bin-dir DIR` to change). When it writes a new `team.toml` it asks which agent CLIs to use:
+```powershell
+.\scripts\setup-agent-team.ps1 -TargetPath C:\path\to\project -DryRun
+.\scripts\setup-agent-team.ps1 -TargetPath C:\path\to\project
+```
+
+The scripts are additive. The bash script writes `team.toml` and an executable `team.sh` into the project (kept if
+present) and links `team` and `team-up` into `~/.local/bin` (`--bin-dir DIR` to change). The PowerShell script writes
+`team.toml` and `team.ps1`, and generates `team.cmd`, `team-up.cmd` and an extensionless `team` shim for Git Bash in
+`~/.local/bin` (`-BinDir DIR`), because Windows symlinks need Developer Mode or admin rights. The shims record the
+Python interpreter found at setup; rerun setup after removing them if that interpreter moves. Both scripts share
+`agent-team/write_config.py`. When they write a new `team.toml` they ask which agent CLIs to use:
 
 - `claude`: Claude Code for every role.
 - `codex`: Codex CLI for every role.
 - `both`: Claude produces, plans `complex` work and reviews; Codex implements `simple`/`complex` work, plans `hard`
   work and does the extra `hard` review, so each CLI reviews the other's output.
 
-Pass `--agents claude|codex|both` to skip the question; without a terminal it picks what is on `PATH` (both, else
-codex, else claude). Usage balancing (`[routing.usage]`) stays off in every preset. If the project is already a git
-repository, the script also adds the state directory (`.agent-team/`) to `.git/info/exclude`; otherwise add it to
-the project's ignore list yourself. The git adapter leaves the state directory out of `opened` and `diff` either
+Then which version control the project uses:
+
+- `git`: the built-in adapter; tasks share the working tree and the guard refuses commits, staging and history edits.
+- `p4`: the Perforce adapter; each task gets a changelist, the guard refuses submit/revert/shelve/sync and the like,
+  and git is denied entirely (the `[vcs]` block of `examples/unreal-p4/team.toml`).
+
+Pass `--agents claude|codex|both` and `--vcs git|p4` (`-Agents`, `-Vcs`) to skip the questions; without a terminal
+setup picks what is on `PATH` (both, else codex, else claude) and detects the VCS (git for a git repository, else
+p4 when installed, else git). Usage balancing (`[routing.usage]`) stays off in every preset. For a git project that
+is already a repository, setup also adds the state directory (`.agent-team/`) to `.git/info/exclude`; otherwise add
+it to the project's ignore list (or `P4IGNORE` file) yourself. The git adapter leaves the state directory out of `opened` and `diff` either
 way. Then, from the project:
 
 ```bash
@@ -39,6 +57,7 @@ team drop <id> ["note"]
 team-up                           # zellij dashboard: usage, focus, live log, tasks, coordinator chat
 team-up "request"                 # same as team new
 ./team.sh                         # install missing dependencies and open the dashboard
+.\team.ps1                        # the same on Windows
 ```
 
 `team.sh` works from any directory and selects Linux Git before user wrappers.
@@ -54,6 +73,13 @@ The launcher records the Logout AI checkout location; set `LOGOUT_AI_ROOT` if
 that checkout moves. CLI sign-in remains interactive and is never copied.
 The dashboard coordinator uses the Producer's configured CLI, model and effort.
 
+`team.ps1` is the Windows counterpart. It installs missing Python 3.13, Git for Windows and Node.js LTS with
+`winget`, Zellij 0.45.1 (`zellij-x86_64-pc-windows-msvc.zip`, pinned SHA-256) into `~/.local/bin`, and missing agent
+CLIs with `npm install --global`, then refreshes `PATH` for the session and runs `team-up` with UTF-8 mode on.
+On Windows the coordinator runs npm-installed CLIs through their node script rather than the `.cmd` shim, because
+`cmd.exe` re-parses arguments and cuts multi-line prompts. VCS guards become `.cmd` and Git Bash shims under
+`guard-bin/` instead of symlinks.
+
 `team` finds the config through `--config <path>` (before the subcommand), else `$TEAM_CONFIG`, else the nearest `team.toml` above the current directory. `teamcfg.load` rejects unknown role names anywhere in `[routing]`.
 
 ## Layout
@@ -63,12 +89,13 @@ The dashboard coordinator uses the Producer's configured CLI, model and effort.
 | `agent-team/team.py` | orchestrator (pipeline, role selection, locks, task state) |
 | `agent-team/teamcfg.py` | `team.toml` loader, XDG/agent-home helpers, template lookup |
 | `agent-team/vcs.py`, `vcs_p4.py` | VCS adapter interface, git adapter, Perforce adapter |
-| `agent-team/bin/` | `team`, `team-up`, `vcs-guard` |
+| `agent-team/bin/` | `team`, `team-up` (Python, both platforms), `vcs-guard` |
+| `agent-team/write_config.py` | writes a new `team.toml` from the agent and VCS presets (used by both setup scripts) |
 | `agent-team/hooks/vcs_open.py` | Claude hook: opens files in the task change before edits |
 | `agent-team/usage_tui`, `codex_reset_consume.py`, `statusline_hook` | usage panel, opt-in Codex reset, Claude statusline dump |
 | `agent-team/focus_tui`, `log_tui`, `tasks_tui`, `chat`, `notifier`, `notify` | dashboard panes and notifications |
 | `agent-team/review_page`, `view_model`, `model_viewer/` | local review webpage, local 3D model viewer |
-| `agent-team/templates/` | `team.toml`, `team.kdl`, `jobs/`, `roles/`, `vcs/` prompt templates |
+| `agent-team/templates/` | `team.toml`, `team.sh`, `team.ps1`, `team.kdl`, `jobs/`, `roles/`, `vcs/` prompt templates |
 | `examples/unreal-p4/` | the original Unreal + Perforce config and role files (examples only) |
 | `agent-team/tests/` | unit and smoke tests |
 
@@ -111,8 +138,8 @@ Adapters never submit, commit, stage, revert or shelve.
 - p4: a numbered pending changelist per task; the hook opens files with `p4 edit -c` and moves default-changelist
   strays into the task changelist.
 
-`bin/vcs-guard` is symlinked by `team.py` under each `guard_names` entry in `<state_dir>/guard-bin/`, which is put
-first on the agents' `PATH` (`TEAM_REAL_<TOOL>` holds the real binary; without it the guard takes the first
+`bin/vcs-guard` is symlinked by `team.py` under each `guard_names` entry in `<state_dir>/guard-bin/` (on Windows:
+`<name>.cmd` and a Git Bash `<name>` shim that set `TEAM_GUARD_TOOL`), which is put first on the agents' `PATH` (`TEAM_REAL_<TOOL>` holds the real binary; without it the guard takes the first
 non-guard match on `PATH`). It refuses `[vcs.deny]` subcommands and `[vcs.deny_flags]` flags for both Claude and
 Codex agents, including when reached through a git alias (`-c alias.x=...` or configured), and refuses git shell
 aliases (`!...`). The guard is a guardrail against accidental commits, not a security boundary: an agent can still
@@ -121,7 +148,7 @@ run the real binary by absolute path. The hard limit for Codex writers is its `w
 
 ## State and runtime inputs
 
-Per project, under `state_dir`: `live.log`, `tNNN/` task folders (`state.json`, hand-offs, `logs/`, `opened.txt`,
+Per project, under `state_dir`: `live.log`, `tNNN/` task folders (`state.json`, `.lock-run` held while it runs, hand-offs, `logs/`, `opened.txt`,
 `changes.diff`, `user_opened.txt`, `packet/`), `.lock-*`, `guard-bin/`, `team.kdl`, `review/`. Optional inputs you
 create by hand: `queue.txt` (`tNNN: title` lines), `decisions.md` (shown by `review_page`), `role_override.json`
 (`{"t012": {"review": "director", "implement": "senior", "after_failed_reviews": 1}}`) and the `burst_file`
@@ -153,6 +180,9 @@ dump, set it as Claude Code's `statusLine` command.
 python3 -I -m unittest discover agent-team/tests
 ./scripts/test-setup-agent-team.sh
 ```
+
+On Windows (CI): `./scripts/test-setup-agent-team.ps1` runs setup, the installed `team.cmd`, a task run against
+fake `.cmd` agents that exit 99, and the `git.cmd` guard.
 
 The smoke test builds a temp git project with `HOME`, `GIT_CONFIG_GLOBAL` and the XDG directories redirected,
 empty probes and fake `claude`/`codex` that exit 99, then checks config loading, task creation, status, the guard,

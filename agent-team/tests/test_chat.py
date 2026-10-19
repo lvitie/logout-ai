@@ -29,7 +29,7 @@ class ChatTests(unittest.TestCase):
                     path.chmod(0o755)
                 env = dict(os.environ, PATH=f'{fake}:{os.environ["PATH"]}',
                            TEAM_CONFIG=str(project / 'team.toml'))
-                result = subprocess.run(['bash', str(ROOT / 'chat'), 'request with spaces'],
+                result = subprocess.run([sys.executable, str(ROOT / 'chat'), 'request with spaces'],
                                         cwd=root, env=env, capture_output=True, text=True, timeout=15)
                 self.assertEqual(result.returncode, 23, result.stderr)
                 record = json.loads(result.stdout)
@@ -49,7 +49,7 @@ class ChatTests(unittest.TestCase):
 
     def test_invalid_config_does_not_launch(self):
         with tempfile.TemporaryDirectory() as tmp:
-            result = subprocess.run(['bash', str(ROOT / 'chat')],
+            result = subprocess.run([sys.executable, str(ROOT / 'chat')],
                                     env=dict(os.environ, TEAM_CONFIG=str(Path(tmp) / 'missing.toml')),
                                     capture_output=True, text=True, timeout=15)
             self.assertNotEqual(result.returncode, 0)

@@ -54,6 +54,10 @@ jobs:
         shell: pwsh
         run: ./scripts/test-setup-project.ps1
 
+      - name: Test PowerShell agent team setup
+        shell: pwsh
+        run: ./scripts/test-setup-agent-team.ps1
+
   dependency-review:
     name: Dependency review
     if: github.event_name == 'pull_request'
