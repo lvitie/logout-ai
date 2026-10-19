@@ -18,6 +18,11 @@
 - [ ] Run a real Claude/Codex task end to end in a scratch git project (needs the user's logins).
 - [x] Ask for claude, codex or both during setup; harden the git guard; pin the Codex writer sandbox.
 - [x] Review and commit.
+- [x] Generate an additive `team.sh` launcher with missing-dependency installation
+  and select the configured CLI for coordinator chat. Verified with 44 unit
+  tests, setup integration, repository validation and independent review;
+  actual x86_64 Zellij 0.45.1 download, SHA-256 and version check passed.
+  Interactive dashboard and real agent tasks remain outside these checks.
 
 ## Next phase: Enforced repository governance
 

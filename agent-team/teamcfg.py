@@ -174,7 +174,8 @@ def main():
         return
     p = cfg["roles"]["producer"]
     out = {"TEAM_CONFIG": cfg["config_path"], "TEAM_ROOT": str(cfg["root"]), "TEAM_STATE": str(cfg["state"]),
-           "TEAM_NAME": cfg["project"]["name"], "TEAM_PRODUCER_MODEL": p["model"], "TEAM_PRODUCER_EFFORT": p["effort"],
+           "TEAM_NAME": cfg["project"]["name"], "TEAM_PRODUCER_CLI": p["cli"],
+           "TEAM_PRODUCER_MODEL": p["model"], "TEAM_PRODUCER_EFFORT": p["effort"],
            "TEAM_NOTIFY_APP": cfg["notify"]["app_name"] or cfg["project"]["name"],
            "TEAM_NOTIFY_SOUND_DIR": cfg["notify"]["sound_dir"], "TEAM_NOTIFY_SOUND": cfg["notify"]["sound_normal"],
            "TEAM_NOTIFY_SOUND_URGENT": cfg["notify"]["sound_urgent"]}

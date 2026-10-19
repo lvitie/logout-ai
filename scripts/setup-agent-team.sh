@@ -243,6 +243,24 @@ fi
 state_hint=", add .agent-team/ to the project ignore list"
 exclude_state_dir && state_hint=""
 
+launcher="$target_path/team.sh"
+if [[ -e "$launcher" || -L "$launcher" ]]; then
+  printf 'kept existing: %s\n' "$launcher"
+  skipped_count=$((skipped_count + 1))
+else
+  if $dry_run; then
+    printf '+ write %q (project launcher)\n' "$launcher"
+  else
+    python3 -I -c 'import pathlib, shlex, sys
+source, destination, root = sys.argv[1:]
+path = pathlib.Path(destination)
+path.write_text(pathlib.Path(source).read_text().replace("@@LOGOUT_AI_ROOT@@", shlex.quote(root)))
+path.chmod(path.stat().st_mode | 0o111)' "$team_root/templates/team.sh" "$launcher" "$repo_root"
+  fi
+  printf 'added: %s\n' "$launcher"
+  added_count=$((added_count + 1))
+fi
+
 link_missing "$team_root/bin/team" "$bin_dir/team"
 link_missing "$team_root/bin/team-up" "$bin_dir/team-up"
 
@@ -253,4 +271,4 @@ else
   printf 'agent team setup complete: %d item(s) added, %d existing item(s) kept\n' \
     "$added_count" "$skipped_count"
 fi
-printf 'next: review %s%s, run team-up from the project\n' "$config" "$state_hint"
+printf 'next: review %s%s, run ./team.sh from the project\n' "$config" "$state_hint"

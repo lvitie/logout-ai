@@ -1,9 +1,21 @@
 #!/usr/bin/env bash
-# Coordinator chat: an interactive Claude session (Producer model) that drives the agent team.
+# Coordinator chat: an interactive session using the configured Producer CLI.
+set -euo pipefail
 here="$(dirname "$(readlink -f "$0")")"
-eval "$(python3 "$here/teamcfg.py" --shell)"
+config_env="$(python3 "$here/teamcfg.py" --shell)"
+eval "$config_env"
 export TEAM_CONFIG PATH="$here/bin:$PATH"
 cd "$TEAM_ROOT" || exit 1
 prompt="$(python3 -c 'import sys; sys.path.insert(0, sys.argv[1]); import teamcfg; c = teamcfg.load(); print(teamcfg.template(c, "roles/coordinator.md").replace("{project}", c["project"]["name"]).replace("{state_dir}", c["project"]["state_dir"]))' "$here")"
-exec claude --model "$TEAM_PRODUCER_MODEL" --effort "$TEAM_PRODUCER_EFFORT" -n "$TEAM_NAME team" \
-  --append-system-prompt "$prompt" "$@"
+case "$TEAM_PRODUCER_CLI" in
+  codex)
+    instructions="$(printf '%s' "$prompt" | python3 -c 'import json, sys; print(json.dumps(sys.stdin.read()))')"
+    exec codex --model "$TEAM_PRODUCER_MODEL" \
+      -c "model_reasoning_effort=\"$TEAM_PRODUCER_EFFORT\"" \
+      -c "developer_instructions=$instructions" "$@"
+    ;;
+  claude)
+    exec claude --model "$TEAM_PRODUCER_MODEL" --effort "$TEAM_PRODUCER_EFFORT" -n "$TEAM_NAME team" \
+      --append-system-prompt "$prompt" "$@"
+    ;;
+esac

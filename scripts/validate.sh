@@ -45,6 +45,7 @@ required_files=(
   "agent-team/bin/vcs-guard"
   "agent-team/hooks/vcs_open.py"
   "agent-team/templates/team.toml"
+  "agent-team/templates/team.sh"
   "agent-team/templates/team.kdl"
   "agent-team/templates/roles/common.md"
   "agent-team/templates/jobs/route.md"
@@ -154,6 +155,7 @@ if ! bash -n \
   "$repo_root/agent-team/bin/team" \
   "$repo_root/agent-team/bin/team-up" \
   "$repo_root/agent-team/chat" \
+  "$repo_root/agent-team/templates/team.sh" \
   "$repo_root/agent-team/notify" \
   "$repo_root/agent-team/notifier" \
   "$repo_root/scripts/validate.sh"; then
@@ -171,6 +173,7 @@ if command -v shellcheck >/dev/null 2>&1; then
     "$repo_root/agent-team/bin/team" \
     "$repo_root/agent-team/bin/team-up" \
     "$repo_root/agent-team/chat" \
+    "$repo_root/agent-team/templates/team.sh" \
     "$repo_root/agent-team/notify" \
     "$repo_root/agent-team/notifier" \
     "$repo_root/scripts/validate.sh" ||

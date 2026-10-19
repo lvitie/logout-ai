@@ -24,11 +24,17 @@ grep -q 'dry run complete' <<<"$dry_output" || fail "dry run did not finish"
 
 "$repo_root/scripts/setup-agent-team.sh" --bin-dir "$bin" "$project" >/dev/null
 [[ -f "$project/team.toml" ]] || fail "team.toml was not created"
+[[ -x "$project/team.sh" ]] || fail "team.sh was not created or is not executable"
+bash -n "$project/team.sh" || fail "team.sh has invalid syntax"
+"$project/team.sh" --help | grep -q 'Missing dependencies' || fail "launcher help failed"
 grep -q '^name = "My-Project"' "$project/team.toml" || fail "project name was not substituted"
 [[ -L "$bin/team" && -L "$bin/team-up" ]] || fail "launchers were not linked"
 
 second="$("$repo_root/scripts/setup-agent-team.sh" --bin-dir "$bin" "$project")"
 grep -q '0 item(s) added' <<<"$second" || fail "second run was not idempotent"
+printf '# preserved launcher\n' >>"$project/team.sh"
+"$repo_root/scripts/setup-agent-team.sh" --bin-dir "$bin" "$project" >/dev/null
+tail -n 1 "$project/team.sh" | grep -qx '# preserved launcher' || fail "existing launcher overwritten"
 
 git -C "$project" init -q
 (cd "$project" && "$bin/team" new --no-run "setup check" >/dev/null && "$bin/team" status | grep -q 'chg:t001') ||

@@ -15,7 +15,7 @@ adapter). `zellij` for the dashboard. The coordinator uses `fcntl` locks and `/p
 ./scripts/setup-agent-team.sh /path/to/project
 ```
 
-The script is additive. It writes `team.toml` into the project (kept if present) and links `team` and `team-up`
+The script is additive. It writes `team.toml` and an executable `team.sh` into the project (kept if present) and links `team` and `team-up`
 into `~/.local/bin` (`--bin-dir DIR` to change). When it writes a new `team.toml` it asks which agent CLIs to use:
 
 - `claude`: Claude Code for every role.
@@ -38,7 +38,21 @@ team redo <id> "feedback"         # send back to the implementer (or Producer)
 team drop <id> ["note"]
 team-up                           # zellij dashboard: usage, focus, live log, tasks, coordinator chat
 team-up "request"                 # same as team new
+./team.sh                         # install missing dependencies and open the dashboard
 ```
+
+`team.sh` works from any directory and selects Linux Git before user wrappers.
+On Fedora (`dnf`) or Debian/Ubuntu (`apt-get`), it installs missing Python, Git,
+download utilities and, when a configured agent CLI is missing, Node/npm.
+Missing Zellij is installed under `~/.local/bin` from the official 0.45.1
+Linux x86_64/aarch64 release, verified against pinned SHA-256 digests; no extra
+package repository is added. Agent CLIs are
+installed with npm under `~/.local`; existing installations are kept. System
+package installation may request sudo. Setup itself installs no dependencies;
+running `team.sh` opts into these installations. Python must be 3.11 or newer.
+The launcher records the Logout AI checkout location; set `LOGOUT_AI_ROOT` if
+that checkout moves. CLI sign-in remains interactive and is never copied.
+The dashboard coordinator uses the Producer's configured CLI, model and effort.
 
 `team` finds the config through `--config <path>` (before the subcommand), else `$TEAM_CONFIG`, else the nearest `team.toml` above the current directory. `teamcfg.load` rejects unknown role names anywhere in `[routing]`.
 
