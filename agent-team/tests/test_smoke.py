@@ -94,6 +94,15 @@ class Project(unittest.TestCase):
         self.assertNotIn("{", prompt.split("## Job")[1])
         self.assertTrue((self.proj / ".agent-team/guard-bin/git").is_symlink())
 
+    def test_status_skips_folders_without_state(self):
+        self.team("new", "--no-run", "real task")
+        (self.proj / ".agent-team/t050").mkdir()  # e.g. a hand-off folder synced from the depot
+        (self.proj / ".agent-team/t051").mkdir()
+        (self.proj / ".agent-team/t051/state.json").write_text("{not json")
+        listing = self.team("status").stdout
+        self.assertIn("real task", listing)
+        self.assertNotIn("t050", listing)
+
     def test_second_task_id_and_drop(self):
         self.team("new", "--no-run", "one")
         self.team("new", "--no-run", "two")
@@ -157,6 +166,10 @@ class Project(unittest.TestCase):
         self.assertIn("not allowed", deny.stderr)
         fwd = subprocess.run(["git", "status", "--porcelain"], cwd=self.proj, env=env, capture_output=True, text=True)
         self.assertEqual(fwd.returncode, 0, fwd.stderr)
+        for tool in ("pkill", "killall"):  # killing by name is refused for agents
+            deny = subprocess.run([tool, "-f", "nothing-matches-this"], cwd=self.proj, env=env, capture_output=True,
+                                  text=True)
+            self.assertEqual((deny.returncode, "is not allowed" in deny.stderr), (1, True), tool)
         self.git("config", "alias.sv", "add")  # aliases set before the run (agents may not run `git config`)
         self.git("config", "alias.sh", "!git commit")
         for argv in (["-c", "alias.ci=commit", "ci", "-qm", "x"], ["sv", "README.md"], ["sh"],
@@ -185,6 +198,7 @@ class Project(unittest.TestCase):
         self.team("run", "t001", ok=False)
         args = argv_file.read_text().splitlines()
         self.assertEqual(args[args.index("-s") + 1], "workspace-write")
+        self.assertIn("--skip-git-repo-check", args)  # Perforce workspaces are not git repos
 
     def test_git_adapter(self):
         a = vcs.Git(self.proj)

@@ -105,3 +105,88 @@ prefix_rule(
     match=["git push --force", "git push -f", "git push --force-with-lease"],
     not_match=["git push", "git push origin feature"],
 )
+
+# Killing by process name, pattern, or process group can take down unrelated
+# work such as dashboards and editors. Kill a PID recorded when it was started.
+# Prefix rules see only simple commands; the agent team's PATH shims and Claude
+# hook also catch pipelines like `pgrep x | xargs kill`.
+prefix_rule(
+    pattern=[[
+        "pkill",
+        "killall",
+        "/usr/bin/pkill",
+        "/usr/bin/killall",
+        "/run/current-system/sw/bin/pkill",
+        "/run/current-system/sw/bin/killall",
+    ]],
+    decision="forbidden",
+    justification="Kill only a PID you started and recorded (kill $PID).",
+    match=["pkill -f blender", "killall node", "/usr/bin/pkill x"],
+    not_match=["kill 12345", "pgrep -x node"],
+)
+
+prefix_rule(
+    pattern=["fuser", "-k"],
+    decision="forbidden",
+    justification="Kill only a PID you started and recorded (kill $PID).",
+    match=["fuser -k 8000/tcp"],
+)
+
+prefix_rule(
+    pattern=["xargs", "kill"],
+    decision="forbidden",
+    justification="Kill only a PID you started and recorded (kill $PID).",
+    match=["xargs kill -9"],
+    not_match=["xargs grep -n pattern"],
+)
+
+prefix_rule(
+    pattern=["xargs", ["-r", "-0", "-n1", "--no-run-if-empty"], "kill"],
+    decision="forbidden",
+    justification="Kill only a PID you started and recorded (kill $PID).",
+    match=["xargs -r kill"],
+    not_match=["xargs -r grep -n pattern"],
+)
+
+prefix_rule(
+    pattern=["xargs", "-n", "1", "kill"],
+    decision="forbidden",
+    justification="Kill only a PID you started and recorded (kill $PID).",
+    match=["xargs -n 1 kill"],
+)
+
+# PID <= 0 signals every process of the user or a whole process group.
+# `kill -0 PID` is a liveness check and stays available.
+prefix_rule(
+    pattern=["kill", ["-1", "0", "--"]],
+    decision="forbidden",
+    justification="Kill only a PID you started and recorded (kill $PID).",
+    match=["kill -1", "kill 0", "kill -- -1234"],
+    not_match=["kill 12345", "kill -9 12345", "kill -0 12345"],
+)
+
+prefix_rule(
+    pattern=["kill", [
+        "-9",
+        "-15",
+        "-2",
+        "-KILL",
+        "-TERM",
+        "-INT",
+        "-HUP",
+        "-SIGKILL",
+        "-SIGTERM",
+    ], ["-1", "0", "--"]],
+    decision="forbidden",
+    justification="Kill only a PID you started and recorded (kill $PID).",
+    match=["kill -9 -1", "kill -9 0", "kill -TERM -- -1234"],
+    not_match=["kill -9 12345"],
+)
+
+prefix_rule(
+    pattern=["kill", "-s", ["KILL", "TERM", "9", "15", "SIGKILL", "SIGTERM"], ["-1", "0", "--"]],
+    decision="forbidden",
+    justification="Kill only a PID you started and recorded (kill $PID).",
+    match=["kill -s KILL -1"],
+    not_match=["kill -s KILL 12345"],
+)

@@ -1,4 +1,6 @@
 """Perforce adapter against a fake p4 on disk (logs argv, canned output). No server, no network. Run with python3 -I."""
+import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -46,6 +48,22 @@ class P4Adapter(unittest.TestCase):
         self.assertIn(f"reopen -c 7 {self.d / 'stray.txt'}", self.calls())
         self.a.prepare_edit(self.d / "other.txt", "7")
         self.assertFalse([c for c in self.calls() if c.startswith(("edit", "reopen")) and "other" in c])
+
+    def test_guard_parses_global_options(self):
+        """-b/-L/-v take a value; `integ` is denied like `integrate`."""
+        env = dict(os.environ, TEAM_CONFIG=str(ROOT.parent / "examples/unreal-p4/team.toml"),
+                   TEAM_REAL_P4=str(self.d / "p4"), TEAM_GUARD_TOOL="p4")
+
+        def guard(*args):
+            return subprocess.run([sys.executable, "-I", str(ROOT / "bin/vcs-guard"), *args], cwd=self.d, env=env,
+                                  capture_output=True, text=True, timeout=10)
+        for argv in (["integ", "//a/...", "//b/..."], ["-b", "5", "submit"], ["-v", "net=1", "integrate", "x"]):
+            r = guard(*argv)
+            self.assertIn("not allowed", r.stderr, argv)
+        self.assertEqual(self.calls(), [])
+        r = guard("-L", "en", "-v", "net=1", "opened")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(self.calls(), ["-L en -v net=1 opened"])
 
     def test_opened_parsing(self):
         self.assertEqual(self.a.opened_files("7"), ["//depot/a.txt", "//depot/b.txt"])

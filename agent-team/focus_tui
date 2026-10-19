@@ -1,147 +1,302 @@
 #!/usr/bin/env python3
-"""Focus panel from planning docs, team status and pending changelists."""
-import os, re, subprocess, sys, time
+"""Focus panel: the planning focus, then live team state from the state dir (running tasks with stage, role and the
+agent's last line; resources; what needs you; queue; done today). A task counts as running only while a team process
+holds its .lock-run, so a crashed run shows as stale. Pending changes are refreshed in the background every 30 s."""
+import json
+import re
+import shutil
+import sys
+import threading
+import time
 from datetime import datetime
-HERE = os.path.dirname(os.path.realpath(__file__))
-sys.path.insert(0, HERE)
-import teamcfg
-import vcs as vcsmod
-CFG = teamcfg.load()
-WS = str(CFG["root"])
-QUEUE = os.path.join(CFG["project"]["state_dir"], CFG["project"]["queue_file"])
-R, G, Y, C, D, B, X = "\033[31m", "\033[32m", "\033[33m", "\033[36m", "\033[2m", "\033[1m", "\033[0m"
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+sys.path.insert(0, str(HERE))
+import team  # noqa: E402
+import teamcfg  # noqa: E402
+
+R, G, Y, M, C, D, B, X = (f"\033[{c}m" for c in (31, 32, 33, 35, 36, 2, 1, 0))
+COL = {"running": C, "done": G, "blocked": R, "failed": R, "corrupt": R, "stale": R, "escalated": Y, "gate": M, "new": D}
+ANSI = re.compile(r"\033\[[0-9;]*m")
+CACHE = {"pending": None, "err": None}  # pending: list of pending change ids, None = unknown
+
+
+def read_json(path, default=None):
+    try:
+        return json.loads(Path(path).read_text())
+    except (OSError, ValueError):
+        return default
+
 
 def read_text(path):
     try:
-        with open(os.path.join(WS, path)) as f:
-            return f.read()
+        return Path(path).read_text(errors="ignore")
     except OSError:
         return ""
 
-def command(args):
-    try:
-        return subprocess.run(args, capture_output=True, text=True, cwd=WS,
-                              timeout=5, check=True).stdout
-    except (OSError, subprocess.SubprocessError):
-        return None
 
-def team_rows():
-    out = command([sys.executable, os.path.join(HERE, "team.py"), "status", "-r"])
-    if out is None:
-        return None
-    rows = []
-    for line in out.splitlines():
-        # The timing column is rendered by team's shared formatter.
-        content, separator, timing = line.rpartition("\t") if "\t" in line else (line, "", "")
-        parts = content.split(None, 7)
-        if len(parts) >= 7 and re.fullmatch(r"t\d+", parts[0]) and parts[2].startswith("chg:"):
-            rows.append(dict(zip(("id", "status", "change", "route", "domain", "stage", "title"),
-                                 parts[:2] + [parts[2][4:]] + parts[3:7] + [parts[7] if len(parts) > 7 else ""])))
-            rows[-1]["reason"] = ""
-            rows[-1]["timing"] = timing if separator else ""
-        elif line.startswith(" ") and rows:
-            rows[-1]["reason"] += " " + line.strip()
-    return rows
+def dur(sec):
+    if sec is None:
+        return "-"
+    m = max(0, int(sec)) // 60
+    return f"{m // 1440}d{m // 60 % 24:02}h" if m >= 1440 else f"{m // 60}h{m % 60:02}m" if m >= 60 else f"{m}m"
 
-def queued(rows):
-    tasks = {r["id"]: r for r in rows}
-    queue = {r["id"]: f"{r['id']}: " + (r["timing"] + " " if r.get("timing") else "") + r["title"]
-             for r in rows if r["status"] == "new"}
-    for line in read_text(QUEUE).splitlines():
-        if not line.strip() or line.lstrip().startswith("#"):
-            continue
-        key = line.split(":", 1)[0].strip()
-        if key not in tasks or tasks[key]["status"] == "new":
-            queue.setdefault(key, line.strip())
-    return list(queue.values())
 
-def current_phase(text):
-    m = re.search(r"^## Current phase\s*\n(.*?)(?=^## |\Z)", text, re.M | re.S)
-    return m.group(1).strip().split("\n\n", 1)[0].replace("\n", " ") if m else ""
-
-def checklist(text):
-    items = []
-    for line in text.splitlines():
-        m = re.match(r"\s*- \[([ xX])\] (.*)", line)
+def clip(s, width):
+    """Cut a line to the pane width without counting or splitting ANSI escapes."""
+    if len(ANSI.sub("", s)) <= width - 1:
+        return s
+    n = i = 0
+    while i < len(s) and n < width - 2:
+        m = ANSI.match(s, i)
         if m:
-            items.append([m[1].lower() == "x", m[2], m[2]])
-        elif items and not line.startswith("#"):
-            items[-1][2] += " " + line.strip()
-    return items
+            i = m.end()
+            continue
+        i, n = i + 1, n + 1
+    return s[:i] + "…" + X
+
 
 def planning():
-    tasks = read_text(CFG["project"]["planning_file"])
-    focus = current_phase(tasks) or current_phase(read_text("ROADMAP.md")) or "Current phase unavailable"
-    needs = [title for done, title, body in checklist(tasks)
-             if not done and re.search(r"Owner:\s*user\b|user[- ]only", body, re.I)]
-    return focus, needs
+    """(current phase, user-owned open items) from the planning file, falling back to ROADMAP.md."""
+    def phase(text):
+        m = re.search(r"^## Current phase\s*\n(.*?)(?=^## |\Z)", text, re.M | re.S)
+        return m.group(1).strip().split("\n\n", 1)[0].replace("\n", " ") if m else ""
+    tasks = read_text(team.WS / team.CFG["project"]["planning_file"])
+    items = []
+    for line in tasks.splitlines():
+        m = re.match(r"\s*- \[([ xX])\] (.*)", line)
+        if m:
+            items.append([m[1] == " ", m[2], m[2]])
+        elif items and not line.startswith("#"):
+            items[-1][2] += " " + line.strip()
+    needs = [title for todo, title, body in items if todo and re.search(r"Owner:\s*user\b|user[- ]only", body, re.I)]
+    return phase(tasks) or phase(read_text(team.WS / "ROADMAP.md")), needs
 
-def pending_cls():
+
+def load_tasks(runs):
+    tasks = []
+    for d in sorted(runs.glob("t[0-9]*"), key=lambda p: (len(p.name), p.name)):
+        if not (d / "state.json").exists():
+            continue  # not a task (e.g. a hand-off folder synced from the depot)
+        s = read_json(d / "state.json")
+        if not isinstance(s, dict) or "status" not in s:
+            s = {"status": "corrupt", "reason": "state.json unreadable or partial"}
+        s = {"change": "?", "title": "", "request": "", "route": None, "domain": None, "stage": -1, "reason": "",
+             "res": [], "plan_rounds": 0, "review_rounds": 0, **s, "id": d.name, "dir": d}
+        s["title"] = s["title"] or (s["request"].splitlines() or [""])[0]
+        tasks.append(s)
+    return tasks
+
+
+def holds_run_lock(d):
+    """True while a team process advances the task. The probe takes the lock for an instant; a `team run` of the same
+    task in that instant reports "already running"."""
     try:
-        ids = vcsmod.make(CFG).pending_changes()
-    except (OSError, ValueError):
-        return ["pending changes unavailable"]
-    return ["pending changes (review/submit): " + ", ".join(ids[i:i+6])
-            for i in range(0, len(ids), 6)]
+        f = (d / ".lock-run").open("a")
+    except OSError:
+        return False
+    with f:
+        try:
+            teamcfg.lock(f, blocking=False)
+            return False
+        except BlockingIOError:
+            return True
 
-def draw():
-    import shutil
-    import shutil as _s; cols, rows_n = _s.get_terminal_size((80, 24))[0], 10**6  # full content; the loop windows it and scrolls
-    rows = team_rows()
-    available = rows is not None
-    rows = rows or []
-    focus, needs = planning()
-    run = [r for r in rows if r["status"] == "running"]
-    attention = [r for r in rows if r["status"] in ("gate", "escalated", "blocked")]
-    head = [f"{C}FOCUS{X} {B}{focus}{X}", f"{B}Now:{X}"]
-    for r in run + attention:
-        head.append(f" {r['id']} {r['status']} {r['stage']} {r['change']} {r['timing']} {r['title']}")
-    if not run and not attention:
-        head.append(f" {D}{'idle' if available else 'team status unavailable'}{X}")
-    needs = [f"{r['id']} {r['status']}: {r['reason'].strip() or r['title']}" for r in attention] + needs + pending_cls()
-    head += [f"{D}needs you:{X}"] + [f" {line}" for line in (needs or ["none"])]
-    done = [f" {G}✓{X} {r['id']} {r['change']} {r['timing']} {r['title']}"
-            for r in rows if r["status"] == "done"][:12]
-    q = queued(rows)
-    qlines = [f" {Y}{i}.{X} {l}" for i, l in enumerate(q, 1)]
-    out, room = list(head), rows_n - len(head)
-    # Current work and user actions precede queued items and recent completions.
-    if room > 1:
-        take = qlines[: max(0, room - 1)]
-        out += [f"{D}-- queued ({len(q)}) --{X}"] + take; room -= 1 + len(take)
-    if room > 1 and done:
-        take = done[: room - 1]
-        out += [f"{D}-- done --{X}"] + take; room -= 1 + len(take)
-    def clip(s):
-        vis = re.sub(r"\033\[[0-9;]*m", "", s)
-        if len(vis) <= cols - 1:
-            return s
-        n, i = 0, 0
-        while i < len(s) and n < cols - 2:
-            m = re.match(r"\033\[[0-9;]*m", s[i:])
-            if m: i += len(m.group(0)); continue
-            i += 1; n += 1
-        return s[:i] + X
-    return [clip(l) for l in out]
 
-# Plain redraw like usage_tui, but also redraw immediately when the pane is resized (zellij reflows the old
-# frame on resize, which looked like a frozen/garbled pane) and clear scrollback so no stale frames pile up.
-def main():
-    import shutil
-    last, size = 0.0, None
-    while True:
-        now = time.time()
-        sz = tuple(shutil.get_terminal_size((80, 24)))
-        if sz != size or now - last >= 10:
+def stage_info(s, now):
+    """(kind, planned role, actual role or None, effort)."""
+    if s["stage"] is None or s["stage"] < 0:
+        kind, planned = "route", "producer"
+    else:
+        try:
+            stages = team.pipeline(s["route"], s["domain"])
+        except Exception:
+            stages = []
+        if s["stage"] >= len(stages):
+            return "end", "", None, ""
+        kind, planned = stages[s["stage"]]
+    prompts = sorted(s["dir"].glob("logs/*.prompt.md"), key=lambda p: p.name)
+    actual = None
+    if prompts:  # the agent the router picked for this stage (routing may swap the planned role)
+        m = re.match(r"\d+-(\w+?)-(\w+)\.prompt\.md$", prompts[-1].name)
+        try:
+            fresh = prompts[-1].stat().st_mtime >= (s.get("stage_started") or 0) - 5
+        except OSError:
+            fresh = False
+        if m and m[1] == kind and m[2] in team.ROLES and fresh:
+            actual = m[2]
+    role = actual or planned
+    effort = team.ROLES.get(role, ("", "", "", ""))[3]
+    no_burst = team.CFG["routing"]["usage"]["no_burst_effort"]
+    if role in no_burst and not team.burst_active():
+        effort = no_burst[role]
+    return kind, planned, actual, effort
+
+
+def tail(path, size=262144):
+    try:
+        with open(path, "rb") as f:
+            f.seek(max(0, f.seek(0, 2) - size))
+            return f.read().decode(errors="ignore").splitlines()
+    except OSError:
+        return []
+
+
+def last_line(s, live_tail):
+    """The newest summarized event from the task's agent log, else its newest live.log line."""
+    logs = sorted(s["dir"].glob("logs/*.jsonl"), key=lambda p: p.name)
+    if logs:
+        cli = team.ROLES.get(logs[-1].stem.split("-", 2)[-1], ("", "claude"))[1]
+        for ln in reversed(tail(logs[-1], 65536)):
             try:
-                lines = draw()
-            except Exception as e:
-                lines = [f"focus panel error: {e}"]
-            lines = lines[: max(1, sz[1] - 1)] + [f"{D}updated {datetime.now():%H:%M:%S}{X}"]
-            sys.stdout.write("\033[3J\033[H\033[J" + "\n".join(lines))
-            sys.stdout.flush()
-            last, size = now, sz
-        time.sleep(0.5)
+                msg, _ = team.summarize(cli, json.loads(ln))
+            except (ValueError, AttributeError, TypeError, KeyError):
+                continue
+            if msg:
+                return " ".join(msg.split())
+    tagged = [ln for ln in live_tail if f"[{s['id']}]" in ln]
+    return " ".join(tagged[-1].split()) if tagged else ""
+
+
+def queue_order(path):
+    """[(key, line)] from the queue file, comments skipped."""
+    return [(ln.split(":", 1)[0].strip(), ln.strip()) for ln in read_text(path).splitlines()
+            if ln.strip() and not ln.lstrip().startswith("#")]
+
+
+def frame(now, width, height, pending=None, err=None, running_ids=None):
+    """Full panel as a list of lines, clipped to width/height. running_ids overrides the run-lock probe (tests)."""
+    runs, cap = team.RUNS, team.MAX_PARALLEL
+    tasks = load_tasks(runs)
+    if running_ids is None:
+        running_ids = {s["id"] for s in tasks if s["status"] == "running" and holds_run_lock(s["dir"])}
+    live_tail = tail(team.LIVE)
+    overrides = read_json(runs / "role_override.json", {}) or {}
+    running, attention, queue = [], [], []
+    for s in tasks:
+        st = s["status"]
+        if st == "running" and s["id"] in running_ids:
+            running.append(s)
+        elif st == "running":
+            attention.append((s, "stale", f"marked running but no team process holds it; resume: team run {s['id']}"))
+        elif st in ("gate", "blocked", "escalated", "failed", "corrupt"):
+            attention.append((s, st, s["reason"] or "-"))
+        elif st == "done" and pending and str(s["change"]) in pending:
+            attention.append((s, "done", f"{team.noun()} {s['change']} pending: review (`team review {s['id']}`)"))
+
+    holders = {r: s["id"] for s in running for r in (s["res"] or team.CFG["locks"]["default"]) if r != "none"}
+    by_id = {s["id"]: s for s in tasks}
+    order = queue_order(runs / team.CFG["project"]["queue_file"])
+    notes = dict(order)
+    new = [by_id[k] for k, _ in order if by_id.get(k, {}).get("status") == "new"]
+    new += [s for s in tasks if s["status"] == "new" and s not in new]
+    for s in new:
+        dep = re.search(r"\b(after [^)]*)", notes.get(s["id"], ""))
+        busy = [f"{r} busy ({holders[r]})" for r in (s["res"] or team.CFG["locks"]["default"]) if r in holders]
+        queue.append((s, dep[1] if dep else "slot cap" if len(running) >= cap else ", ".join(busy) or "ready, not started"))
+    queue += [({"id": k, "title": t.split(":", 1)[-1].strip()}, "planned")
+              for k, t in order if k not in by_id and not re.fullmatch(r"t\d+", k)]
+    today = datetime.fromtimestamp(now).date()
+    done = sorted((s for s in tasks if s["status"] == "done" and s.get("finished")
+                   and datetime.fromtimestamp(s["finished"]).date() == today), key=lambda s: -s["finished"])[:8]
+
+    focus, user_items = planning()
+    mode = read_json(team.MODE, {})
+    mode = mode.get("mode", "?") if isinstance(mode, dict) else "?"
+    out = [f"{B}{datetime.fromtimestamp(now):%H:%M:%S}{X}  route {({'claude': C, 'codex': Y}.get(mode, G))}{mode}{X}"
+           f"  running {(R if len(running) >= cap else G)}{len(running)}/{cap}{X}",
+           f"{C}FOCUS{X} {B}{focus or 'current phase unavailable'}{X}"]
+
+    rows, logs = [], []
+    for s in running:
+        kind, planned, actual, effort = stage_info(s, now)
+        role = actual or planned
+        model = team.ROLES.get(role, ("", "", "?"))[2].replace("claude-", "")
+        ov = overrides.get(s["id"]) if isinstance(overrides.get(s["id"]), dict) else {}
+        swap = f"{planned}→{role}" + (" ov" if role in ov.values() else "") if actual and actual != planned else role
+        rounds = s["plan_rounds"] if kind.startswith("plan") else s["review_rounds"]
+        rnd = f"r{rounds + 1}/{team.MAX_ROUNDS + 1}" if kind != "route" else ""
+        res = ",".join(s["res"])
+        times = f"{dur(now - s['stage_started']) if s.get('stage_started') else '-'}/" \
+                f"{dur(now - s['created']) if s.get('created') else '-'}"
+        starting = "" if actual else f" {D}(starting){X}"
+        if width < 100:  # narrow pane: stage and role first, title last
+            rows.append(f" {C}{B}{s['id']:<5}{X} {kind[:11]:<11} {B}{swap}{X} {rnd} {times} {s['change']} {Y}{res}{X}"
+                        f" {D}{model}/{effort}{X}{starting} {s['title']}")
+        else:
+            rows.append(f" {C}{B}{s['id']:<5}{X} {s['title'][:28]:<28} {Y}{res:<7}{X} {kind:<11} {B}{swap}{X}"
+                        f" {D}{model}/{effort}{X} {rnd} {times} {s['change']}{starting}")
+        logs.append(f"   {D}{last_line(s, live_tail) or '(no output yet)'}{X}")
+
+    names = [r for r in team.CFG["locks"]["names"] if r != "none"]
+    res_cells = "  ".join(f"{n}:" + (f"{Y}{holders[n]}{X}" if n in holders else f"{D}free{X}") for n in names)
+    att = [f" {COL.get(st, '')}{s['id']:<5} {st:<9}{X} {why}  {D}{s['change']} {s['title'][:30]}{X}"
+           for s, st, why in attention[:10]]
+    att += [f" {D}+{len(attention) - 10} more{X}"] if len(attention) > 10 else []
+    att += [f" {Y}you{X}       {t}" for t in user_items]
+    if pending:
+        att.append(f" {D}pending: {', '.join(pending[:8])}{' …' if len(pending) > 8 else ''}{X}")
+    que = [f" {D}{i}.{X} {s['id']:<5} {s['title'][:40]}  {Y}{why}{X}" for i, (s, why) in enumerate(queue[:8], 1)]
+    que += [f" {D}+{len(queue) - 8} more{X}"] if len(queue) > 8 else []
+    dn = [f" {G}✓{X} {s['id']:<5} {datetime.fromtimestamp(s['finished']):%H:%M} {s['change']} {s['title'][:40]}"
+          for s in done]
+    na = f"  {D}pending check unavailable: {err}{X}" if err else ""  # None without err: first check still running
+
+    full = (out + [f"{B}RUNNING{X}" + ("" if running else f"  {D}none{X}")] + [ln for p in zip(rows, logs) for ln in p]
+            + [f"{B}RESOURCES{X} {res_cells}"]
+            + [f"{B}NEEDS YOU{X}" + na + ("" if att else f"  {D}none{X}")] + att
+            + [f"{B}QUEUE{X}" + ("" if que else f"  {D}empty{X}")] + que
+            + [f"{B}DONE today{X}" + ("" if dn else f"  {D}none{X}")] + dn)
+    if len(full) > height:  # first drop the per-task agent lines
+        full = [ln for ln in full if ln not in logs]
+    if len(full) > height:
+        # short pane: NEEDS YOU lines first, QUEUE/DONE as counts; every header stays visible
+        def cnt(name, n, col):
+            return f"{B}{name}{X} {col if n else D}{n}{X}"
+        foot = [" · ".join([cnt("NEEDS YOU", len(att), R), cnt("QUEUE", len(queue), Y), cnt("DONE", len(done), G)])
+                + na + f"  {D}{res_cells}{X}"]
+        room = max(0, height - len(out) - 1 - len(foot))
+        run_rows = rows[:room]
+        if len(rows) > room and room:
+            run_rows = rows[:room - 1] + [f" {D}+{len(rows) - room + 1} more running{X}"]
+        room -= len(run_rows)
+        full = (out + [f"{B}RUNNING{X}" + ("" if running else f"  {D}none{X}")] + run_rows + att[:max(0, room)] + foot)
+    return [clip(ln, width) for ln in full[:height]]
+
+
+def refresher():
+    """Background: pending changes from the VCS; never blocks the redraw."""
+    while True:
+        try:
+            CACHE["pending"], CACHE["err"] = team.VCS.pending_changes(), None
+        except Exception as e:  # never let the thread die silently
+            CACHE["pending"], CACHE["err"] = None, f"{type(e).__name__} {str(e)[:40]}"
+        time.sleep(30)
+
+
+def main():
+    team.init()
+    threading.Thread(target=refresher, daemon=True).start()
+    prev = None
+    sys.stdout.write("\033[?25l\033[2J")  # hide cursor, clear once; later frames overwrite in place (no flicker)
+    try:
+        while True:
+            w, h = shutil.get_terminal_size((100, 30))
+            try:
+                lines = frame(time.time(), max(10, w), max(1, h), CACHE["pending"], CACHE["err"])
+            except Exception as e:  # never crash the pane
+                lines = [clip(f"focus panel error: {e!r}", max(10, w))]
+            if lines != prev:
+                sys.stdout.write("\033[H" + "\033[K\n".join(lines) + "\033[K\033[J")
+                sys.stdout.flush()
+                prev = lines
+            time.sleep(2)
+    except KeyboardInterrupt:
+        pass
+    finally:
+        sys.stdout.write("\033[?25h\n")
+
 
 if __name__ == "__main__":
     main()

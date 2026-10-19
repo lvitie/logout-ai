@@ -94,6 +94,7 @@ On Windows the coordinator runs npm-installed CLIs through their node script rat
 | `agent-team/bin/` | `team`, `team-up` (Python, both platforms), `vcs-guard` |
 | `agent-team/write_config.py` | writes a new `team.toml` from the agent and VCS presets (used by both setup scripts) |
 | `agent-team/hooks/vcs_open.py` | Claude hook: opens files in the task change before edits |
+| `agent-team/hooks/bash_guard.py` | Claude hook: denies killing processes by name, pattern or process group |
 | `agent-team/usage_tui`, `codex_reset_consume.py`, `statusline_hook` | usage panel, opt-in Codex reset, Claude statusline dump |
 | `agent-team/focus_tui`, `log_tui`, `tasks_tui`, `chat`, `notifier`, `notify` | dashboard panes, alerts and notifications |
 | `agent-team/review_page`, `view_model`, `model_viewer/` | HTML review page (`team review`), local 3D model viewer |
@@ -147,6 +148,18 @@ Codex agents, including when reached through a git alias (`-c alias.x=...` or co
 aliases (`!...`). The guard is a guardrail against accidental commits, not a security boundary: an agent can still
 run the real binary by absolute path. The hard limit for Codex writers is its `workspace-write` sandbox, which keeps
 `.git` read-only (network access follows `[sandbox_workspace_write]` in the Codex config, off by default); Claude agents get the same subcommands as `Bash(...)` deny rules.
+Codex runs with `--skip-git-repo-check`, so Perforce and other non-git workspaces work.
+
+Agents may kill only a PID they started and recorded: killing by name once took down the user's dashboard.
+`guard-bin/` holds refusing `pkill` and `killall` shims (POSIX), `hooks/bash_guard.py` denies Claude Bash commands
+that kill by name or pattern (`pgrep ... | xargs kill`, `kill $(pidof x)`, `taskkill /IM`, `Stop-Process -Name`) or
+signal PID <= 0 or a process group, and `codex-home/rules/default.rules` forbids the simple forms for Codex.
+
+The focus pane shows the planning focus, running tasks (stage, planned and actual role, model and effort, round,
+elapsed time, the agent's last line), lock holders, what needs you (gates, blocked, escalated, failed and corrupt
+tasks, tasks marked running whose process is gone, user-owned planning items, pending changes), the queue with why
+each task waits, and today's finished tasks. A task counts as running only while a team process holds its
+`.lock-run`.
 
 ## State and runtime inputs
 
@@ -188,7 +201,8 @@ fake `.cmd` agents that exit 99, and the `git.cmd` guard.
 
 The smoke test builds a temp git project with `HOME`, `GIT_CONFIG_GLOBAL` and the XDG directories redirected,
 empty probes and fake `claude`/`codex` that exit 99, then checks config loading, task creation, status, the guard,
-the adapters, the shared journal and `review_page` escaping. No network and no real agents.
+the adapters, the shared journal and `review_page` escaping. No network and no real agents. `test_bash_guard.py`
+covers the kill hook and `test_focus_tui.py` renders the focus pane from fixture state.
 
 ## Porting a project
 

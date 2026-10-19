@@ -53,10 +53,20 @@ def _clean_path():
     return os.pathsep.join(p for p in os.environ.get("PATH", "").split(os.pathsep) if p and p != guard)
 
 
+KILL_SHIM = ("#!/bin/sh\necho \"agent team: $(basename \"$0\") is not allowed. Kill only a PID you started and "
+             "recorded (kill \\$MYPID).\" >&2\nexit 1\n")
+
+
 def ensure_guards():
     """Symlink vcs-guard under each [vcs].guard_names entry; those names shadow the real tools for agents. Windows
-    symlinks need extra privileges, so there each name gets a .cmd shim (PowerShell, cmd) and an sh one (Git Bash)."""
+    symlinks need extra privileges, so there each name gets a .cmd shim (PowerShell, cmd) and an sh one (Git Bash).
+    pkill and killall get refusing shims: killing by name took down the user's dashboard."""
     _guard_dir().mkdir(parents=True, exist_ok=True)
+    if os.name != "nt":
+        for name in ("pkill", "killall"):
+            shim = _guard_dir() / name
+            shim.write_text(KILL_SHIM)
+            shim.chmod(0o755)
     guard = HERE / "bin/vcs-guard"
     for name in CFG["vcs"]["guard_names"]:
         link = _guard_dir() / name
@@ -277,11 +287,14 @@ def deny_rules():
 
 def agent_cmd(cli, model, effort, readonly, out):
     if cli == "claude":
-        hook = f'"{Path(sys.executable).as_posix()}" "{(HERE / "hooks/vcs_open.py").as_posix()}"'
+        py = f'"{Path(sys.executable).as_posix()}"'
+        hook = f'{py} "{(HERE / "hooks/vcs_open.py").as_posix()}"'
+        guard = f'{py} "{(HERE / "hooks/bash_guard.py").as_posix()}"'  # denies kill by name (pkill, pgrep | kill)
         settings = {
             "hooks": {
                 "PreToolUse": [{"matcher": "Edit|Write|MultiEdit|NotebookEdit",
-                                "hooks": [{"type": "command", "command": f"{hook} pre"}]}],
+                                "hooks": [{"type": "command", "command": f"{hook} pre"}]},
+                               {"matcher": "Bash", "hooks": [{"type": "command", "command": guard}]}],
                 "PostToolUse": [{"matcher": "Write", "hooks": [{"type": "command", "command": f"{hook} post"}]}],
             },
             "permissions": {"deny": deny_rules()},
@@ -293,7 +306,7 @@ def agent_cmd(cli, model, effort, readonly, out):
             cmd += ["--tools", "Read,Glob,Grep"]
         return cmd
     cmd = ["codex", "exec", "-m", model, "-c", f'model_reasoning_effort="{effort}"', "-C", str(WS),
-           "--json", "-o", str(out)]
+           "--skip-git-repo-check", "--json", "-o", str(out)]  # Perforce and other non-git workspaces
     # workspace-write keeps writes inside the workspace and .git read-only, whatever the user's Codex config says
     return cmd + ["-s", "read-only" if readonly else "workspace-write", "-"]
 
@@ -303,7 +316,8 @@ def reap(pid):
     if os.name == "nt":
         subprocess.run(["taskkill", "/PID", str(pid), "/T", "/F"], capture_output=True, check=False)
         return
-    subprocess.run(["pkill", "-TERM", "-P", str(pid)], check=False)
+    # the real pkill, not the guard shim (a team run started from an agent has guard-bin on its PATH)
+    subprocess.run([shutil.which("pkill", path=_clean_path()) or "pkill", "-TERM", "-P", str(pid)], check=False)
     time.sleep(5)
     try:
         os.kill(pid, 15)
@@ -829,7 +843,11 @@ def cmd_status(a):
         print('No tasks yet. Start one with: team new "<request>"')
     now = time.time()
     for d in tasks:
-        s = json.loads((d / "state.json").read_text())
+        try:
+            s = json.loads((d / "state.json").read_text())
+            assert isinstance(s, dict) and "id" in s
+        except (OSError, ValueError, AssertionError):
+            continue  # no or corrupt state.json (a folder synced from the depot, or mid-write)
         print(f"{s['id']}  {s['status']:9}  chg:{s['change']}  {str(s['route']):7} {str(s['domain']):8} "
               f"{stage_label(s):22} {(s['title'] or s['request'])[:50]}\t{format_task_timing(s, now)}")
         if s["reason"] and s["status"] != "running":

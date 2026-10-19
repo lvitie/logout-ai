@@ -7,7 +7,8 @@ from vcs import Vcs
 class Adapter(Vcs):
     tool = "p4"
     noun = "changelist"
-    arg_opts = frozenset({"-c", "-d", "-u", "-p", "-H", "-P", "-z", "-F", "-x", "-C", "-Q", "-r", "--field"})
+    arg_opts = frozenset({"-c", "-d", "-u", "-p", "-H", "-P", "-z", "-F", "-x", "-C", "-Q", "-r", "-b", "-L", "-v",
+                          "--field"})
 
     def new_change(self, desc, hint=""):
         form = self.out("--field", f"Description={desc}", "--field", "Files=", "change", "-o")

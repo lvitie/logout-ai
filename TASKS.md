@@ -32,6 +32,10 @@
 - [ ] Run `scripts/test-setup-agent-team.ps1` on Windows CI and `team.ps1` on a real
   Windows machine.
 - [x] Ask for git or p4 during setup (`--vcs`/`-Vcs`, detected without a terminal).
+- [x] Port the Inferno fixes: no killing by name (PATH shims, Claude Bash hook,
+  Codex rules), `--skip-git-repo-check` for Codex, `team status` skipping folders
+  without state, p4 `-b/-L/-v` options and the `integ` synonym, and the richer focus
+  pane (run-lock based, so it works on Windows too).
 
 ## Next phase: Enforced repository governance
 

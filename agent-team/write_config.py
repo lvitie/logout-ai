@@ -20,8 +20,8 @@ P4 = """[vcs]
 kind = "p4"                   # git, or any X with a vcs_X.py adapter
 guard_names = ["p4", "git"]   # tools shadowed on the agents' PATH by bin/vcs-guard
 [vcs.deny]                    # subcommands agents may not run per tool, also via aliases; "*" denies the tool entirely
-p4 = ["submit", "revert", "shelve", "unshelve", "obliterate", "sync", "clean", "flush", "integrate", "copy", "merge",
-      "populate"]
+p4 = ["submit", "revert", "shelve", "unshelve", "obliterate", "sync", "clean", "flush", "integrate", "integ",
+      "copy", "merge", "populate"]
 git = ["*"]
 [vcs.deny_flags]              # tool -> subcommand -> refused flags (also inside combined short flags like -df)
 p4 = { change = ["-d", "-f"], changelist = ["-d", "-f"] }

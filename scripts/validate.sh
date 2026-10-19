@@ -78,6 +78,7 @@ required_files=(
   "agent-team/bin/team-up"
   "agent-team/bin/vcs-guard"
   "agent-team/hooks/vcs_open.py"
+  "agent-team/hooks/bash_guard.py"
   "agent-team/templates/team.toml"
   "agent-team/write_config.py"
   "agent-team/templates/team.sh"
@@ -88,6 +89,8 @@ required_files=(
   "agent-team/templates/vcs/git.md"
   "agent-team/tests/test_smoke.py"
   "agent-team/tests/test_vcs_p4.py"
+  "agent-team/tests/test_bash_guard.py"
+  "agent-team/tests/test_focus_tui.py"
   "examples/unreal-p4/team.toml"
   "docs/AGENT_TEAM.md"
   "scripts/setup-agent-team.sh"
@@ -327,6 +330,18 @@ if command -v codex >/dev/null 2>&1 && codex --version >/dev/null 2>&1; then
       bash -lc 'git push --force'
   )" || fail "invalid codex-home/rules/default.rules"
 
+  kill_policy_result="$(
+    codex execpolicy check \
+      --rules "$repo_root/codex-home/rules/default.rules" \
+      pkill -f node
+  )" || fail "invalid codex-home/rules/default.rules"
+
+  pid_kill_policy_result="$(
+    codex execpolicy check \
+      --rules "$repo_root/codex-home/rules/default.rules" \
+      kill -9 12345
+  )" || fail "invalid codex-home/rules/default.rules"
+
   if [[ -n "$python_cmd" ]]; then
     "$python_cmd" -c 'import json, sys; raise SystemExit(json.loads(sys.argv[1]).get("decision") != "allow")' \
       "$read_only_policy_result" || fail "default rules must allow read-only inspection commands"
@@ -334,6 +349,10 @@ if command -v codex >/dev/null 2>&1 && codex --version >/dev/null 2>&1; then
       "$forbidden_policy_result" || fail "default rules must forbid repository deletion"
     "$python_cmd" -c 'import json, sys; raise SystemExit(json.loads(sys.argv[1]).get("decision") == "allow")' \
       "$wrapper_policy_result" || fail "default rules must not blanket-allow shell wrappers"
+    "$python_cmd" -c 'import json, sys; raise SystemExit(json.loads(sys.argv[1]).get("decision") != "forbidden")' \
+      "$kill_policy_result" || fail "default rules must forbid killing processes by name"
+    "$python_cmd" -c 'import json, sys; raise SystemExit(json.loads(sys.argv[1]).get("decision") == "forbidden")' \
+      "$pid_kill_policy_result" || fail "default rules must allow killing a recorded PID"
   fi
 fi
 
