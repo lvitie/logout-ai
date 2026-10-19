@@ -1,0 +1,25 @@
+#!/usr/bin/env python3
+"""view_model <file.fbx|glb> [more files...] [--port N] [--open]: serve a local 3D viewer (orbit, wireframe, normals,
+skeleton, per-mesh toggles) at http://127.0.0.1:8765/ . Files are copied into model_viewer/models/ (generated output, do not commit)."""
+import http.server, json, os, shutil, socketserver, sys, threading
+HERE = os.path.dirname(os.path.realpath(__file__)); ROOT = os.path.join(HERE, "model_viewer")
+port, files, a, open_it = 8765, [], sys.argv[1:], False
+while a:
+    x = a.pop(0)
+    if x == "--port": port = int(a.pop(0))
+    elif x == "--open": open_it = True
+    else: files.append(x)
+os.makedirs(os.path.join(ROOT, "models"), exist_ok=True)
+names = []
+for f in files:
+    if not os.path.isfile(f): sys.exit(f"not a file: {f}")
+    n = os.path.basename(f); shutil.copy2(f, os.path.join(ROOT, "models", n)); names.append(n)
+json.dump(names, open(os.path.join(ROOT, "models", "models.json"), "w"))
+class H(http.server.SimpleHTTPRequestHandler):
+    def __init__(self, *a, **k): super().__init__(*a, directory=ROOT, **k)
+    def log_message(self, *a): pass
+class S(socketserver.ThreadingMixIn, http.server.HTTPServer): daemon_threads = True; allow_reuse_address = True
+print(f"model viewer: http://127.0.0.1:{port}/  ({len(names)} model(s)); Ctrl+C to stop", flush=True)
+if open_it:  # default browser
+    import subprocess; subprocess.Popen(["xdg-open", f"http://127.0.0.1:{port}/"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+S(("127.0.0.1", port), H).serve_forever()

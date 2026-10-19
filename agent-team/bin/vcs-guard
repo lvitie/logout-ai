@@ -1,0 +1,55 @@
+#!/usr/bin/env python3
+"""Agent-team PATH guard, installed under each [vcs].guard_names entry: refuses the VCS subcommands listed in
+[vcs].deny (config from $TEAM_CONFIG), also when reached through an alias, and forwards everything else to the real
+tool ($TEAM_REAL_<TOOL>, else the first non-guard match on PATH). A guardrail against accidents, not a security
+boundary: an agent can still call the real binary by path."""
+import os
+import shlex
+import shutil
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+import teamcfg  # noqa: E402
+import vcs  # noqa: E402
+
+tool = Path(sys.argv[0]).name
+argv = sys.argv[1:]
+me = os.path.realpath(__file__)
+real = os.environ.get(f"TEAM_REAL_{tool.upper()}")
+if not real:  # first match on PATH that is not this guard under any spelling
+    real = next((c for d in os.environ.get("PATH", "").split(os.pathsep)
+                 if d and (c := shutil.which(tool, path=d)) and os.path.realpath(c) != me), None)
+if not real:
+    sys.exit(f"agent team: real {tool} not found")
+
+
+def flag_hit(arg, flags):
+    """--long, --long=value, -x, and -x inside combined short flags like -df."""
+    if arg.split("=", 1)[0] in flags:
+        return True
+    return arg.startswith("-") and not arg.startswith("--") and any(f"-{c}" in flags for c in arg[1:])
+
+
+cfg = teamcfg.load()
+cls = vcs.adapter_class(cfg["vcs"]["kind"])
+own = cls.tool == tool
+deny = cfg["vcs"]["deny"].get(tool, [])
+sub, rest = vcs.subcommand(cls.arg_opts if own else frozenset(), argv)
+global_args = argv[:len(argv) - len(rest) - 1] if sub else argv
+seen = set()
+while True:
+    if "*" in deny or sub in deny:
+        sys.exit(f"agent team: '{tool} {sub}' is not allowed; the user does this.")
+    flags = cfg["vcs"]["deny_flags"].get(tool, {}).get(sub, [])
+    if any(flag_hit(a, flags) for a in rest):
+        sys.exit(f"agent team: '{tool} {sub}' with {'/'.join(flags)} is not allowed.")
+    expansion = cls(os.getcwd(), real).alias(global_args, sub) if own and sub and sub not in seen else None
+    if expansion is None:
+        break
+    if expansion.startswith("!"):
+        sys.exit(f"agent team: shell alias '{tool} {sub}' is not allowed.")
+    seen.add(sub)
+    words = shlex.split(expansion)
+    sub, rest = (words[0], words[1:] + rest) if words else ("", rest)
+os.execv(real, [real, *argv])

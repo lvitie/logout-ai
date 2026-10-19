@@ -1,0 +1,147 @@
+#!/usr/bin/env python3
+"""Focus panel from planning docs, team status and pending changelists."""
+import os, re, subprocess, sys, time
+from datetime import datetime
+HERE = os.path.dirname(os.path.realpath(__file__))
+sys.path.insert(0, HERE)
+import teamcfg
+import vcs as vcsmod
+CFG = teamcfg.load()
+WS = str(CFG["root"])
+QUEUE = os.path.join(CFG["project"]["state_dir"], CFG["project"]["queue_file"])
+R, G, Y, C, D, B, X = "\033[31m", "\033[32m", "\033[33m", "\033[36m", "\033[2m", "\033[1m", "\033[0m"
+
+def read_text(path):
+    try:
+        with open(os.path.join(WS, path)) as f:
+            return f.read()
+    except OSError:
+        return ""
+
+def command(args):
+    try:
+        return subprocess.run(args, capture_output=True, text=True, cwd=WS,
+                              timeout=5, check=True).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+def team_rows():
+    out = command([os.path.join(HERE, "bin/team"), "status", "-r"])
+    if out is None:
+        return None
+    rows = []
+    for line in out.splitlines():
+        # The timing column is rendered by team's shared formatter.
+        content, separator, timing = line.rpartition("\t") if "\t" in line else (line, "", "")
+        parts = content.split(None, 7)
+        if len(parts) >= 7 and re.fullmatch(r"t\d+", parts[0]) and parts[2].startswith("chg:"):
+            rows.append(dict(zip(("id", "status", "change", "route", "domain", "stage", "title"),
+                                 parts[:2] + [parts[2][4:]] + parts[3:7] + [parts[7] if len(parts) > 7 else ""])))
+            rows[-1]["reason"] = ""
+            rows[-1]["timing"] = timing if separator else ""
+        elif line.startswith(" ") and rows:
+            rows[-1]["reason"] += " " + line.strip()
+    return rows
+
+def queued(rows):
+    tasks = {r["id"]: r for r in rows}
+    queue = {r["id"]: f"{r['id']}: " + (r["timing"] + " " if r.get("timing") else "") + r["title"]
+             for r in rows if r["status"] == "new"}
+    for line in read_text(QUEUE).splitlines():
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        key = line.split(":", 1)[0].strip()
+        if key not in tasks or tasks[key]["status"] == "new":
+            queue.setdefault(key, line.strip())
+    return list(queue.values())
+
+def current_phase(text):
+    m = re.search(r"^## Current phase\s*\n(.*?)(?=^## |\Z)", text, re.M | re.S)
+    return m.group(1).strip().split("\n\n", 1)[0].replace("\n", " ") if m else ""
+
+def checklist(text):
+    items = []
+    for line in text.splitlines():
+        m = re.match(r"\s*- \[([ xX])\] (.*)", line)
+        if m:
+            items.append([m[1].lower() == "x", m[2], m[2]])
+        elif items and not line.startswith("#"):
+            items[-1][2] += " " + line.strip()
+    return items
+
+def planning():
+    tasks = read_text(CFG["project"]["planning_file"])
+    focus = current_phase(tasks) or current_phase(read_text("ROADMAP.md")) or "Current phase unavailable"
+    needs = [title for done, title, body in checklist(tasks)
+             if not done and re.search(r"Owner:\s*user\b|user[- ]only", body, re.I)]
+    return focus, needs
+
+def pending_cls():
+    try:
+        ids = vcsmod.make(CFG).pending_changes()
+    except (OSError, ValueError):
+        return ["pending changes unavailable"]
+    return ["pending changes (review/submit): " + ", ".join(ids[i:i+6])
+            for i in range(0, len(ids), 6)]
+
+def draw():
+    import shutil
+    import shutil as _s; cols, rows_n = _s.get_terminal_size((80, 24))[0], 10**6  # full content; the loop windows it and scrolls
+    rows = team_rows()
+    available = rows is not None
+    rows = rows or []
+    focus, needs = planning()
+    run = [r for r in rows if r["status"] == "running"]
+    attention = [r for r in rows if r["status"] in ("gate", "escalated", "blocked")]
+    head = [f"{C}FOCUS{X} {B}{focus}{X}", f"{B}Now:{X}"]
+    for r in run + attention:
+        head.append(f" {r['id']} {r['status']} {r['stage']} {r['change']} {r['timing']} {r['title']}")
+    if not run and not attention:
+        head.append(f" {D}{'idle' if available else 'team status unavailable'}{X}")
+    needs = [f"{r['id']} {r['status']}: {r['reason'].strip() or r['title']}" for r in attention] + needs + pending_cls()
+    head += [f"{D}needs you:{X}"] + [f" {line}" for line in (needs or ["none"])]
+    done = [f" {G}✓{X} {r['id']} {r['change']} {r['timing']} {r['title']}"
+            for r in rows if r["status"] == "done"][:12]
+    q = queued(rows)
+    qlines = [f" {Y}{i}.{X} {l}" for i, l in enumerate(q, 1)]
+    out, room = list(head), rows_n - len(head)
+    # Current work and user actions precede queued items and recent completions.
+    if room > 1:
+        take = qlines[: max(0, room - 1)]
+        out += [f"{D}-- queued ({len(q)}) --{X}"] + take; room -= 1 + len(take)
+    if room > 1 and done:
+        take = done[: room - 1]
+        out += [f"{D}-- done --{X}"] + take; room -= 1 + len(take)
+    def clip(s):
+        vis = re.sub(r"\033\[[0-9;]*m", "", s)
+        if len(vis) <= cols - 1:
+            return s
+        n, i = 0, 0
+        while i < len(s) and n < cols - 2:
+            m = re.match(r"\033\[[0-9;]*m", s[i:])
+            if m: i += len(m.group(0)); continue
+            i += 1; n += 1
+        return s[:i] + X
+    return [clip(l) for l in out]
+
+# Plain redraw like usage_tui, but also redraw immediately when the pane is resized (zellij reflows the old
+# frame on resize, which looked like a frozen/garbled pane) and clear scrollback so no stale frames pile up.
+def main():
+    import shutil
+    last, size = 0.0, None
+    while True:
+        now = time.time()
+        sz = tuple(shutil.get_terminal_size((80, 24)))
+        if sz != size or now - last >= 10:
+            try:
+                lines = draw()
+            except Exception as e:
+                lines = [f"focus panel error: {e}"]
+            lines = lines[: max(1, sz[1] - 1)] + [f"{D}updated {datetime.now():%H:%M:%S}{X}"]
+            sys.stdout.write("\033[3J\033[H\033[J" + "\n".join(lines))
+            sys.stdout.flush()
+            last, size = now, sz
+        time.sleep(0.5)
+
+if __name__ == "__main__":
+    main()

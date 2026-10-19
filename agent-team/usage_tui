@@ -1,0 +1,414 @@
+#!/usr/bin/env python3
+"""Small usage panel for the team dashboard: Codex rate limits (real, from rollout logs),
+Claude token use over 5 h / 7 d (local estimate from transcripts) and team spend from live.log.
+Reads $CODEX_HOME/sessions and $CLAUDE_CONFIG_DIR/projects; never auth.json. The Claude plan endpoint (which uses
+Claude Code's OAuth token) is used only when team.toml [usage] claude_endpoint = true."""
+import glob
+import json
+import fcntl
+import os
+import re
+import select
+import subprocess
+import time
+import sys
+import urllib.request
+from datetime import datetime, timezone
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import teamcfg  # noqa: E402
+
+CODEX_HOME, CLAUDE_HOME = teamcfg.codex_home(), teamcfg.claude_home()
+R, G, Y, C, D, X = "\033[31m", "\033[32m", "\033[33m", "\033[36m", "\033[2m", "\033[0m"
+
+
+def bar(pct, width=24):
+    pct = max(0.0, min(100.0, pct))
+    col = G if pct < 60 else Y if pct < 85 else R
+    n = round(width * pct / 100)
+    return f"{col}{'█' * n}{D}{'░' * (width - n)}{X} {col}{pct:5.1f}%{X}"
+
+
+def human(n):
+    return f"{n / 1e6:.1f}M" if n >= 1e6 else f"{n / 1e3:.0f}k" if n >= 1e3 else str(int(n))
+
+
+def until(ts):
+    s = int(ts - time.time())
+    if s <= 0:
+        return "now"
+    d, s = divmod(s, 86400)
+    h, s = divmod(s, 3600)
+    return f"{d}d{h:02d}h" if d else f"{h}h{s // 60:02d}m"
+
+
+def codex():
+    files = sorted(glob.glob(f"{CODEX_HOME}/sessions/*/*/*/*.jsonl"), key=os.path.getmtime, reverse=True)[:6]
+    for f in files:
+        try:
+            with open(f, "rb") as fh:
+                fh.seek(0, 2)
+                fh.seek(max(0, fh.tell() - 400_000))
+                tail = fh.read().decode("utf-8", "ignore").splitlines()
+        except OSError:
+            continue
+        for line in reversed(tail):
+            if '"rate_limits"' in line:
+                try:
+                    j = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                rl = (j.get("payload") or {}).get("rate_limits") or {}
+                return rl, j.get("timestamp", "")
+    return None, ""
+
+
+def claude():
+    now, tot5, tot7 = time.time(), 0, 0
+    seen = set()
+    for f in glob.glob(f"{CLAUDE_HOME}/projects/*/*.jsonl"):
+        if now - os.path.getmtime(f) > 7 * 86400:
+            continue
+        try:
+            for line in open(f, errors="ignore"):
+                if '"usage"' not in line:
+                    continue
+                try:
+                    j = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                m = j.get("message") or {}
+                u = m.get("usage")
+                if not u or j.get("type") != "assistant":
+                    continue
+                key = (m.get("id"), j.get("requestId"))
+                if key in seen:
+                    continue
+                seen.add(key)
+                t = datetime.fromisoformat(j["timestamp"].replace("Z", "+00:00")).timestamp()
+                n = u.get("input_tokens", 0) + u.get("output_tokens", 0) + u.get("cache_creation_input_tokens", 0)
+                if now - t < 7 * 86400:
+                    tot7 += n
+                if now - t < 5 * 3600:
+                    tot5 += n
+        except OSError:
+            pass
+    return tot5, tot7
+
+
+_cache = {"t": 0, "v": None}
+HOOK_FILE = str(teamcfg.claude_rate_file())
+
+
+def claude_plan(timeout=10):
+    """Real plan limits: usage endpoint (read-only use of Claude Code's token, polled <= 1/2 min),
+    falling back to the statusline hook's dump. Returns (windows, source) or (None, reason)."""
+    if time.time() - _cache["t"] < 120 and _cache["v"]:
+        return _cache["v"]
+    res = (None, "unavailable")
+    try:
+        if not _cfg_value("usage", "claude_endpoint"):
+            raise RuntimeError("endpoint off ([usage] claude_endpoint)")
+        cred = json.load(open(f"{CLAUDE_HOME}/.credentials.json"))["claudeAiOauth"]
+        if cred["expiresAt"] / 1000 < time.time() + 60:
+            raise RuntimeError("token expired, open Claude Code to refresh")
+        req = urllib.request.Request("https://api.anthropic.com/api/oauth/usage", headers={
+            "Authorization": "Bearer " + cred["accessToken"], "anthropic-beta": "oauth-2025-04-20",
+            "User-Agent": "claude-code/usage-panel"})
+        j = json.load(urllib.request.urlopen(req, timeout=timeout))
+        w = []
+        for key, label in (("five_hour", "5h"), ("seven_day", "7d"), ("seven_day_opus", "7d opus"), ("seven_day_sonnet", "7d sonnet")):
+            v = j.get(key)
+            if v and v.get("utilization") is not None:
+                w.append((label, v["utilization"], datetime.fromisoformat(v["resets_at"]).timestamp()))
+        for lim in j.get("limits") or []:  # model-scoped weekly limits (e.g. Fable)
+            sc = ((lim.get("scope") or {}).get("model") or {}).get("display_name")
+            if lim.get("kind") == "weekly_scoped" and sc and lim.get("percent") is not None:
+                w.append((f"7d {sc}", lim["percent"], datetime.fromisoformat(lim["resets_at"]).timestamp()))
+        res = (w, "endpoint")
+    except Exception as e:
+        try:
+            h = json.load(open(HOOK_FILE))
+            if time.time() - os.path.getmtime(HOOK_FILE) < 6 * 3600:
+                w = [(lbl, h[k]["used_percentage"], h[k]["resets_at"]) for k, lbl in (("five_hour", "5h"), ("seven_day", "7d")) if k in h]
+                res = (w, "statusline hook")
+        except Exception:
+            res = (None, str(e)[:60])
+    _cache["t"], _cache["v"] = time.time(), res
+    return res
+
+
+_JOURNAL = str(teamcfg.codex_journal())  # shared by every project on this CODEX_HOME
+CX_CACHE = _JOURNAL + "/codex_resets.json"
+CX_TTL, CX_FAIL_TTL, CX_DEFAULT_H = 600, 120, 336
+MANUAL_RESETS = _JOURNAL + "/codex_resets.txt"
+
+
+def _abs_secs(v):
+    """expiresAt as epoch seconds (API unit unverified: ms values are > 1e11; ISO strings accepted)."""
+    if isinstance(v, str):
+        try:
+            return datetime.fromisoformat(v.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            v = float(v)
+    v = float(v)
+    return v / 1000 if v > 1e11 else v
+
+
+def _cx_request(method, params, timeout):
+    """One bounded stdio app-server session; caller supplies the RPC method."""
+    log = os.environ.get("AGENT_TEAM_CODEX_LAUNCH_LOG")
+    if log:
+        with open(log, "a") as f:
+            f.write(f"{time.time():.0f} pid={os.getpid()}\n")
+    p = subprocess.Popen(["codex", "app-server"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                         stderr=subprocess.DEVNULL, bufsize=0)
+    try:
+        fd, buf, end = p.stdout.fileno(), b"", time.monotonic() + timeout
+        os.set_blocking(fd, False)
+
+        def send(o):
+            p.stdin.write((json.dumps(o) + "\n").encode()); p.stdin.flush()
+
+        def wait_for(rid):
+            nonlocal buf
+            while True:
+                while b"\n" in buf:
+                    line, buf = buf.split(b"\n", 1)
+                    try:
+                        j = json.loads(line)
+                    except ValueError:
+                        continue
+                    if isinstance(j, dict) and j.get("id") == rid:
+                        if "error" in j:
+                            raise RuntimeError("codex app-server RPC error")
+                        return j["result"]
+                left = end - time.monotonic()
+                if left <= 0:
+                    raise TimeoutError("codex app-server timed out")
+                if select.select([fd], [], [], min(left, 0.5))[0]:
+                    chunk = os.read(fd, 65536)
+                    if not chunk:
+                        raise EOFError("codex app-server closed")
+                    buf += chunk
+
+        send({"id": 1, "method": "initialize", "params": {"clientInfo": {"name": "agent-team-usage", "version": "1"}}})
+        wait_for(1)
+        send({"method": "initialized"})
+        send({"id": 2, "method": method, "params": params})
+        return wait_for(2)
+    finally:
+        p.kill()
+        try:
+            p.wait(1)
+        except subprocess.TimeoutExpired:
+            pass
+        p.stdin.close()
+        p.stdout.close()
+
+
+def _cx_fetch(timeout):
+    """Read only. Returns count, absolute expiry epochs and the first raw expiry."""
+    rc = _cx_request("account/rateLimits/read", {"excludeResetCreditDetails": False}, timeout)["rateLimitResetCredits"]
+    raw = [c["expiresAt"] for c in rc.get("credits") or [] if c.get("expiresAt") and c.get("status", "available") == "available"]
+    return int(rc["availableCount"]), [_abs_secs(v) for v in raw], raw[:1]
+
+
+def codex_fresh():
+    """No rollout, cache or manual fallback: preflight for the opt-in reset helper."""
+    result = _cx_request("account/rateLimits/read", {"excludeResetCreditDetails": False}, 15)
+    now = time.time()
+    out = {"codex_source": "app-server", "codex_fetched_at": now}
+    rc = result.get("rateLimitResetCredits") or {}
+    count = rc.get("availableCount")
+    if type(count) is int and count >= 0:
+        out["codex_reset_available_count"] = count
+    rl = (result.get("rateLimitsByLimitId") or {}).get("codex") or result.get("rateLimits") or {}
+    wk = next((w for w in (rl.get("primary"), rl.get("secondary"))
+               if isinstance(w, dict) and type(w.get("windowDurationMins")) is int
+               and w["windowDurationMins"] == 10080), None)
+    if wk is None:
+        raise ValueError("exact 10080-minute window required")
+    reset = wk.get("resetsAt")
+    if type(reset) is not int or not now < reset <= now + 604800:
+        raise ValueError("future reset epoch in seconds within seven days required")
+    out["codex_7d"] = wk.get("usedPercent")
+    out["codex_7d_window_duration_mins"] = wk["windowDurationMins"]
+    out["codex_7d_resets_at"] = reset
+    out["codex_7d_resets_in_h"] = round((reset - now) / 3600, 1)
+    return out
+
+
+def _cx_load():
+    try:
+        with open(CX_CACHE) as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def _cx_view(c, how):
+    """(n, how, exp_h) from absolute expiries; hours recomputed now, values <= 0 dropped."""
+    now = time.time()
+    h = sorted(round((e - now) / 3600, 1) for e in c["exp"])
+    h = [x for x in h if x > 0]
+    n = max(0, c["n"] - (len(c["exp"]) - len(h)))
+    h += [CX_DEFAULT_H] * max(0, n - len(h))
+    return n, how + (f", next expires in {until(now + min(h) * 3600)}" if h else ""), sorted(h)
+
+
+def _cx_recent_fail():
+    try:
+        return time.time() - os.path.getmtime(CX_CACHE + ".fail") < CX_FAIL_TTL
+    except OSError:
+        return False
+
+
+def codex_resets(deadline=None):
+    """Reset credits left on the Codex account -> (count, how, [hours until each expires]) or (None, "", None).
+    Read-only; cached 10 min across processes in CX_CACHE (absolute expiries); on refresh failure serves the
+    stale cache, then the manual file (each assumed to expire in 336 h)."""
+    if deadline is None:
+        deadline = time.monotonic() + 22
+    c = _cx_load()
+    if c and time.time() - c.get("t", 0) < CX_TTL:
+        return _cx_view(c, "cached")
+    if not _cx_recent_fail():
+        lock = None
+        fetching = False
+        try:
+            os.makedirs(os.path.dirname(CX_CACHE), exist_ok=True)
+            lock = open(CX_CACHE + ".lock", "w")
+            while True:  # polled so the caller's deadline holds
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except OSError:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError("lock wait")
+                    time.sleep(min(0.2, remaining))
+            c2 = _cx_load()  # another process may have refreshed while we waited
+            if c2 and time.time() - c2.get("t", 0) < CX_TTL:
+                return _cx_view(c2, "cached")
+            c = c2 or c
+            if not _cx_recent_fail():
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("refresh deadline")
+                fetching = True
+                n, exp, raw = _cx_fetch(min(15, remaining))
+                c = {"t": time.time(), "n": n, "exp": exp, "raw_expiresAt": raw}
+                tmp = f"{CX_CACHE}.{os.getpid()}.tmp"
+                with open(tmp, "w") as f:
+                    json.dump(c, f)
+                os.replace(tmp, CX_CACHE)
+                return _cx_view(c, "live")
+        except Exception:
+            if fetching:
+                try:
+                    with open(CX_CACHE + ".fail", "w"):
+                        pass
+                except OSError:
+                    pass
+        finally:
+            if lock:
+                lock.close()
+    if c:
+        return _cx_view(c, "stale cache")
+    try:
+        with open(MANUAL_RESETS) as f:
+            n = int(f.read().strip())
+        return n, "manual file", [CX_DEFAULT_H] * n
+    except (OSError, ValueError):
+        return None, "", None
+
+
+def _cfg_value(section, key):
+    try:
+        return teamcfg.load()[section][key]
+    except (SystemExit, OSError, ValueError, KeyError):
+        return None
+
+
+def team_spend():
+    total, runs = 0.0, 0
+    try:
+        for line in open(teamcfg.load()["state"] / "live.log", errors="ignore"):
+            m = re.search(r"\] done, \$([0-9.]+)", line)
+            if m:
+                total += float(m.group(1))
+                runs += 1
+    except (SystemExit, OSError):
+        pass
+    return total, runs
+
+
+def draw():
+    out = ["\033[H\033[J" + f"{C}USAGE{X}  {D}{datetime.now():%H:%M:%S}{X}"]
+    rl, ts = codex()
+    if rl:
+        for name in ("primary", "secondary"):
+            w = rl.get(name)
+            if w:
+                mins = w.get("window_minutes", 0)
+                label = f"{mins // 1440}d" if mins >= 1440 else f"{mins // 60}h"
+                out.append(f"Codex  {label:>3} {bar(w.get('used_percent', 0))}  resets {until(w.get('resets_at', 0))}")
+        if rl.get("rate_limit_reached_type"):
+            out.append(f"{R}Codex limit reached: {rl['rate_limit_reached_type']}{X}")
+    else:
+        out.append(f"{D}Codex: no rate-limit data yet{X}")
+    n, how, _ = codex_resets()
+    if n is not None:
+        out.append(f"Codex resets left: {G}{n}{X} {D}({how}){X}")
+    w, src = claude_plan()
+    for label, pct, reset in (w or []):
+        out.append(f"Claude {label:>3} {bar(pct)}  resets {until(reset)}")
+    if not w:
+        out.append(f"{Y}Claude plan %: {src}{X}")
+    c5, c7 = claude()
+    out.append(f"{D}Claude tokens 5h {human(c5)} / 7d {human(c7)} (local){X}")
+    spend, runs = team_spend()
+    out.append(f"Team agents    {runs} runs, ${spend:,.2f} reported (Claude-side agents)")
+    print("\n".join(out), flush=True)
+
+
+if __name__ == "__main__":
+    if "--json" in sys.argv:  # for team.py: {"5h": pct, "7d": pct, ...} or {} when unknown
+        if "--fresh-codex" in sys.argv:
+            try:
+                print(json.dumps(codex_fresh()))
+            except Exception:
+                print("{}")
+                sys.exit(1)
+            sys.exit(0)
+        deadline = time.monotonic() + 22
+        w, _ = claude_plan(timeout=max(1, min(8, deadline - time.monotonic())))
+        out = {lbl: pct for lbl, pct, _ in (w or [])}
+        for lbl, _, reset in (w or []):
+            out[lbl + "_resets_in_h"] = round((reset - time.time()) / 3600, 1)
+        try:  # Codex weekly used % so team.py can balance the two plans
+            rl, _ = codex()
+            wk = next((x for x in ((rl or {}).get("primary"), (rl or {}).get("secondary")) if x and x.get("window_minutes", 0) >= 10080), None)
+            if wk:
+                h = (wk.get("resets_at", 0) - time.time()) / 3600
+                if h > 0:
+                    out["codex_7d"], out["codex_7d_resets_in_h"] = wk.get("used_percent", 0), round(h, 1)
+                else:  # window already rolled over since the last rollout line
+                    out["codex_7d"], out["codex_7d_resets_in_h"] = 0, 168
+        except Exception:
+            pass
+        try:
+            _, _, exp_h = codex_resets(deadline)
+            if exp_h is not None:
+                out["codex_reset_exp_h"] = exp_h
+        except Exception:
+            pass
+        print(json.dumps(out))
+        sys.exit(0)
+    while True:
+        try:
+            draw()
+        except Exception as e:  # keep the panel alive
+            print(f"usage panel error: {e}", flush=True)
+        time.sleep(30)

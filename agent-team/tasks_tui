@@ -1,0 +1,49 @@
+#!/usr/bin/env python3
+"""Readable task list: one coloured line per task, newest first; extra detail dimmed below."""
+import os, re, shutil, subprocess, sys, textwrap, time
+HERE = os.path.dirname(os.path.realpath(__file__))
+sys.path.insert(0, HERE)
+import teamcfg
+WS = str(teamcfg.load()["root"])
+X, D, B = "\033[0m", "\033[2m", "\033[1m"
+ST = {"running": ("▶", "\033[36m"), "done": ("✓", "\033[32m"), "blocked": ("■", "\033[31m"), "escalated": ("!", "\033[33m"),
+      "failed": ("✗", "\033[31m"), "gate": ("?", "\033[35m"), "new": ("·", "\033[2m")}
+ROW = re.compile(r"^(t\d+)\s+(\S+)\s+chg:(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(.*)$")
+ROW_NEW = re.compile(r"^(t\d+)\s+(\S+)\s+chg:(\S+)\s+(.*)$")
+
+def draw():
+    w = max(40, shutil.get_terminal_size((100, 30))[0])
+    raw = subprocess.run([os.path.join(HERE, "bin/team"), "status", "-r"], capture_output=True, text=True, cwd=WS).stdout
+    tasks, cur = [], None
+    for l in raw.splitlines():
+        m = ROW.match(l)
+        if m:
+            cur = {"id": m[1], "st": m[2], "change": m[3], "route": m[4], "dom": m[5], "stage": m[6], "title": m[7].strip(), "extra": []}
+            tasks.append(cur)
+        elif (m := ROW_NEW.match(l)):  # unrouted task
+            cur = {"id": m[1], "st": m[2], "change": m[3], "route": "", "dom": "", "stage": "", "title": re.sub(r"\s+", " ", m[4]).strip(), "extra": []}
+            tasks.append(cur)
+        elif cur and l.strip() and not l.strip().startswith(("Review ", "/")):
+            cur["extra"].append(l.strip())
+    out = []
+    for t in reversed(tasks):  # oldest first: an overflowing pane then shows the newest at the bottom
+        icon, c = ST.get(t["st"], ("·", D))
+        meta = " ".join(x for x in (t["route"], t["dom"], t["stage"] if t["st"] != "done" else "") if x and x != "None")
+        out.append(f"{c}{icon} {B}{t['id']}{X} {c}{t['st']:<9}{X} {D}{t['change']}{X} {D}{meta}{X}")
+        for ln in textwrap.wrap(t["title"], w - 4) or [""]:
+            out.append(f"    {ln}")
+        for e in t["extra"][:2]:
+            out.append(f"    {D}{textwrap.shorten(e, w - 5)}{X}")
+    return out
+
+prev = None
+while True:
+    try:
+        lines = draw()
+    except Exception as e:
+        lines = [f"tasks panel error: {e}"]
+    if lines != prev:
+        sys.stdout.write("\033[3J\033[H\033[J" + "\n".join(lines))
+        sys.stdout.flush()
+        prev = lines
+    time.sleep(5)

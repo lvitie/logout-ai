@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# usage: notify "title" "body" [urgent]   (app name and sounds from team.toml [notify], exported by notifier)
+app="${TEAM_NOTIFY_APP:-agent-team}"
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+export DBUS_SESSION_BUS_ADDRESS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=$XDG_RUNTIME_DIR/bus}"
+u=normal snd="${TEAM_NOTIFY_SOUND:-}"
+[ "${3:-}" = urgent ] && { u=critical; snd="${TEAM_NOTIFY_SOUND_URGENT:-}"; }
+notify-send -u "$u" -a "$app" "$1" "$2"
+if [ -n "${TEAM_NOTIFY_SOUND_DIR:-}" ] && [ -n "$snd" ] && [ -f "$TEAM_NOTIFY_SOUND_DIR/$snd" ] && command -v pw-play >/dev/null; then
+  pw-play "$TEAM_NOTIFY_SOUND_DIR/$snd" >/dev/null 2>&1 &
+fi

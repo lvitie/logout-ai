@@ -10,6 +10,15 @@
 - [ ] Run the PowerShell setup integration test on Windows.
 - [x] Inspect the final diff for only project-bootstrapping changes.
 
+## Agent team extraction
+
+- [x] Copy and abstract the agent team into `agent-team/` (config, VCS adapters, templates, launcher).
+- [x] Add `scripts/setup-agent-team.sh` with `--dry-run` and its integration test.
+- [x] Add unit and smoke tests and wire them into `validate.sh`.
+- [ ] Run a real Claude/Codex task end to end in a scratch git project (needs the user's logins).
+- [x] Ask for claude, codex or both during setup; harden the git guard; pin the Codex writer sandbox.
+- [x] Review and commit.
+
 ## Next phase: Enforced repository governance
 
 - [ ] Configure a default-branch ruleset after CI check names exist remotely.

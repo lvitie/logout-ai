@@ -1,0 +1,110 @@
+#!/usr/bin/env python3
+"""Quick review webpage: review_page [tNNN ...] [--since tNNN] [--open]
+Builds <state_dir>/review/review.html (local, offline; markdown rendered by marked.min.js if you drop it next to the page,
+otherwise shown as plain text).
+Each task card: status, CL, summary + review hand-offs and the changed docs/*.md rendered as formatted text,
+plus stills and clips from its packet. Default: every task newer than --since, or the last 8 done tasks."""
+import html, json, os, re, shutil, sys
+from pathlib import Path
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import teamcfg
+import vcs as vcsmod
+
+CFG = teamcfg.load()
+WS, RUNS = CFG["root"], CFG["state"]
+NAME = CFG["project"]["name"]
+OUT = RUNS / "review"
+MEDIA = OUT / "media"
+MEDIA.mkdir(parents=True, exist_ok=True)
+
+
+def media(t, exts, limit, maxmb):
+    files = [p for p in (RUNS / t / "packet").rglob("*") if p.is_file() and p.suffix.lower() in exts
+             and 0 < p.stat().st_size < maxmb * 1e6 and "diagnostic" not in str(p).lower()]
+    files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    names = []
+    for p in files[:limit]:
+        d = MEDIA / f"{t}_{p.name}"
+        shutil.copy2(p, d)
+        names.append(d.name)
+    return names
+
+
+def last(t, pat):
+    f = sorted((RUNS / t).glob(pat))
+    return f[-1].read_text(errors="ignore") if f else ""
+
+
+def changed_docs(change):
+    docs = []
+    try:
+        files = vcsmod.make(CFG).changed_files(change)
+    except (OSError, ValueError, RuntimeError):
+        return docs
+    for p in files:
+        if p.suffix == ".md" and p.exists() and p.stat().st_size < 400_000 and RUNS not in p.parents:
+            docs.append(p)
+    return docs[:4]
+
+
+def md(text):  # embedded as a JSON string, rendered client-side
+    return "<div class=md data-md='" + html.escape(json.dumps(text), quote=True).replace("'", "&#39;") + "'></div>"
+
+
+def main():
+    argv = sys.argv[1:]
+    if "--since" in argv:
+        i = argv.index("--since"); del argv[i:i + 2]
+    args = [a for a in argv if not a.startswith("--")]
+    tids = [a for a in args if re.fullmatch(r"t\d+", a)]
+    since = None
+    if "--since" in sys.argv:
+        since = sys.argv[sys.argv.index("--since") + 1]
+    allt = sorted(p.name for p in RUNS.glob("t0[0-9][0-9]"))
+    if not tids:
+        if since:
+            tids = [t for t in allt if int(t[1:]) > int(since[1:])]
+        else:
+            done = [t for t in allt if json.load(open(RUNS / t / "state.json")).get("status") == "done"]
+            tids = done[-8:]
+    badge = {"done": "#2e7d32", "blocked": "#b26a00", "gate": "#b26a00", "escalated": "#c62828", "failed": "#c62828", "running": "#1565c0"}
+    h = ["""<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>
+<title>__NAME__ review</title><style>
+:root{color-scheme:dark}body{font:16px/1.55 system-ui,sans-serif;max-width:1000px;margin:0 auto;padding:16px;background:#14110f;color:#e8e0d8}
+h1{color:#ff7a45}.card{background:#1f1a17;border:1px solid #3a302a;border-radius:10px;padding:14px;margin:14px 0}
+.b{padding:2px 8px;border-radius:9px;color:#fff;font-size:13px}.g{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:8px;margin-top:8px}
+img,video{width:100%;border-radius:6px}.md{overflow-x:auto}.md pre,.md code{background:#2a221d;border-radius:5px;padding:2px 5px}.md pre{padding:10px;overflow-x:auto}
+.md table{border-collapse:collapse}.md td,.md th{border:1px solid #3a302a;padding:4px 8px}.md a{color:#ff9a6b}
+details{margin-top:8px}summary{cursor:pointer;color:#ff9a6b}nav a{margin-right:10px;color:#ff9a6b}small{color:#a89c90}</style>""".replace("__NAME__", html.escape(NAME))]
+    h.append(f"<h1>{html.escape(NAME)} review</h1><nav><a href=#decisions>Decisions</a>{''.join(f'<a href=#{html.escape(t)}>{html.escape(t)}</a>' for t in tids)}</nav>")
+    dec = RUNS / "decisions.md"
+    if dec.exists() and dec.read_text().strip():
+        h.append("<div class=card id=decisions style='border-color:#ff7a45'><h2>Decisions needed</h2>" + md(dec.read_text()) + "</div>")
+    for t in tids:
+        s = json.load(open(RUNS / t / "state.json"))
+        c = badge.get(s["status"], "#555")
+        h.append(f"<div class=card id={t}><h2>{t} · {html.escape(s['title'])} <span class=b style='background:{c}'>{html.escape(s['status'])}</span> <small>{html.escape(str(s.get('change')))}</small></h2>")
+        impl = last(t, "*implement*.md") or last(t, "*implementation*.md")
+        rev = last(t, "*review-*.md")
+        if impl:
+            h.append("<details open><summary>Implementation summary</summary>" + md(impl[:6000]) + "</details>")
+        if rev:
+            h.append("<details><summary>Review verdict</summary>" + md(rev[:4000]) + "</details>")
+        for d in changed_docs(s.get("change")) if s.get("change") else []:
+            h.append(f"<details><summary>Doc: {html.escape(d.name)}</summary>" + md(d.read_text(errors='ignore')[:60000]) + "</details>")
+        vids, imgs = media(t, {".mp4", ".webm"}, 4, 40), media(t, {".png", ".jpg", ".jpeg"}, 10, 6)
+        if vids:
+            h.append("<div class=g>" + "".join(f"<video controls preload=metadata src='media/{v}'></video>" for v in vids) + "</div>")
+        if imgs:
+            h.append("<div class=g>" + "".join(f"<a href='media/{i}'><img loading=lazy src='media/{i}'></a>" for i in imgs) + "</div>")
+        h.append("</div>")
+    h.append("""<script src=marked.min.js></script><script>
+document.querySelectorAll('.md').forEach(e=>{const t=JSON.parse(e.dataset.md);if(window.marked)e.innerHTML=marked.parse(t);else e.textContent=t});</script>""")
+    (OUT / "review.html").write_text("\n".join(h))
+    if dec.exists() and dec.read_text().strip():  # standalone decisions page, same styling
+        (OUT / "decisions.html").write_text(h[0] + "<h1>Decisions needed</h1><div class=card>" + md(dec.read_text()) + "</div>" + h[-1])
+    print(OUT / "review.html", len(tids), "tasks")
+
+
+main()

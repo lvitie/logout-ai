@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Watches the agent team; pops a desktop notification with sound when something needs the user.
+here="$(dirname "$(readlink -f "$0")")"
+eval "$(python3 "$here/teamcfg.py" --shell)"
+export TEAM_CONFIG TEAM_NOTIFY_APP TEAM_NOTIFY_SOUND_DIR TEAM_NOTIFY_SOUND TEAM_NOTIFY_SOUND_URGENT PATH="$here/bin:$here:$PATH"
+cd "$TEAM_ROOT" || exit 1
+declare -A seen
+while true; do
+  while read -r id st rest; do
+    case "$st" in
+      gate | blocked | escalated | failed)
+        key="$id:$st"
+        if [ -z "${seen[$key]:-}" ]; then
+          seen[$key]=1
+          reason=$(team status "$id" 2>/dev/null | sed -n '2,3p' | tr '\n' ' ' | cut -c1-180)
+          notify "$TEAM_NAME: $id $st" "$reason" urgent
+        fi
+        ;;
+      done)
+        key="$id:done"
+        if [ -z "${seen[$key]:-}" ]; then
+          seen[$key]=1
+          [ -n "${INIT:-}" ] && notify "$TEAM_NAME: $id done" "$rest"
+        fi
+        ;;
+    esac
+  done < <(team status 2>/dev/null | grep -E "^t[0-9]+ ")
+  INIT=1
+  sleep 30
+done

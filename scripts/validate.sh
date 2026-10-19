@@ -36,6 +36,25 @@ required_files=(
   "scripts/test-install.sh"
   "scripts/test-setup-project.ps1"
   "scripts/test-setup-project.sh"
+  "agent-team/teamcfg.py"
+  "agent-team/team.py"
+  "agent-team/vcs.py"
+  "agent-team/vcs_p4.py"
+  "agent-team/bin/team"
+  "agent-team/bin/team-up"
+  "agent-team/bin/vcs-guard"
+  "agent-team/hooks/vcs_open.py"
+  "agent-team/templates/team.toml"
+  "agent-team/templates/team.kdl"
+  "agent-team/templates/roles/common.md"
+  "agent-team/templates/jobs/route.md"
+  "agent-team/templates/vcs/git.md"
+  "agent-team/tests/test_smoke.py"
+  "agent-team/tests/test_vcs_p4.py"
+  "examples/unreal-p4/team.toml"
+  "docs/AGENT_TEAM.md"
+  "scripts/setup-agent-team.sh"
+  "scripts/test-setup-agent-team.sh"
 )
 
 for relative in "${required_files[@]}"; do
@@ -60,6 +79,17 @@ if command -v python3 >/dev/null 2>&1; then
 
   python3 -c 'import pathlib, sys, tomllib; config = tomllib.loads(pathlib.Path(sys.argv[1]).read_text()); raise SystemExit(config.get("features", {}).get("memories") is not True)' \
     "$repo_root/codex-home/config.toml" || fail "codex-home/config.toml must enable features.memories"
+
+  for team_config in "$repo_root/agent-team/templates/team.toml" "$repo_root/examples/unreal-p4/team.toml"; do
+    python3 -I -c 'import pathlib, sys; sys.path.insert(0, sys.argv[1]); import teamcfg; teamcfg.load(pathlib.Path(sys.argv[2]))' \
+      "$repo_root/agent-team" "$team_config" || fail "invalid agent team config ${team_config#"$repo_root"/}"
+  done
+
+  # The coordinator needs Linux (/proc); its config is still checked everywhere.
+  if [[ "$(uname -s)" == Linux ]]; then
+    python3 -I -B -m unittest discover "$repo_root/agent-team/tests" >/dev/null 2>&1 ||
+      fail "agent team unit tests failed (run: python3 -I -m unittest discover agent-team/tests)"
+  fi
 fi
 
 if [[ -d "$repo_root/.codex/skills" ]]; then
@@ -119,6 +149,13 @@ if ! bash -n \
   "$repo_root/scripts/setup-project.sh" \
   "$repo_root/scripts/test-install.sh" \
   "$repo_root/scripts/test-setup-project.sh" \
+  "$repo_root/scripts/setup-agent-team.sh" \
+  "$repo_root/scripts/test-setup-agent-team.sh" \
+  "$repo_root/agent-team/bin/team" \
+  "$repo_root/agent-team/bin/team-up" \
+  "$repo_root/agent-team/chat" \
+  "$repo_root/agent-team/notify" \
+  "$repo_root/agent-team/notifier" \
   "$repo_root/scripts/validate.sh"; then
   fail "Bash syntax validation failed"
 fi
@@ -129,6 +166,13 @@ if command -v shellcheck >/dev/null 2>&1; then
     "$repo_root/scripts/setup-project.sh" \
     "$repo_root/scripts/test-install.sh" \
     "$repo_root/scripts/test-setup-project.sh" \
+    "$repo_root/scripts/setup-agent-team.sh" \
+    "$repo_root/scripts/test-setup-agent-team.sh" \
+    "$repo_root/agent-team/bin/team" \
+    "$repo_root/agent-team/bin/team-up" \
+    "$repo_root/agent-team/chat" \
+    "$repo_root/agent-team/notify" \
+    "$repo_root/agent-team/notifier" \
     "$repo_root/scripts/validate.sh" ||
     fail "ShellCheck failed"
 fi
@@ -166,6 +210,10 @@ fi
 
 if ! bash "$repo_root/scripts/test-setup-project.sh"; then
   fail "project setup integration test failed"
+fi
+
+if [[ "$(uname -s)" == Linux ]] && ! bash "$repo_root/scripts/test-setup-agent-team.sh"; then
+  fail "agent team setup integration test failed"
 fi
 
 if [[ $errors -gt 0 ]]; then

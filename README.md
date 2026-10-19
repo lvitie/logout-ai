@@ -325,8 +325,10 @@ dependency review for pull requests.
 - `.agents/skills/`: reusable skills
 - `codex-plugins.txt`: opt-in Codex plugin selections
 - `codex-home/`: portable global instructions, configuration, profiles, and rules
+- `agent-team/`: project-agnostic Claude/Codex agent team coordinator (`team`, `team-up`, TUIs); `examples/` holds a sample config
 - `docs/`: reference documentation loaded only when explicitly requested
 - `scripts/`: installation, project setup, integration tests, and validation
 
 See [docs/CODEX_LAYOUT.md](docs/CODEX_LAYOUT.md) for detailed discovery and
-configuration behavior.
+configuration behavior. See [docs/AGENT_TEAM.md](docs/AGENT_TEAM.md) for the
+agent team (`./scripts/setup-agent-team.sh --dry-run /path/to/project`).

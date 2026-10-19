@@ -1,0 +1,71 @@
+#!/usr/bin/env python3
+"""Readable live.log: per-agent colours, tool calls as one dim line (like the Claude Code TUI), messages wrapped."""
+import os, re, shutil, subprocess, sys, textwrap
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import teamcfg
+LIVE = str(teamcfg.load()["state"] / "live.log")
+X, D, B, R, G, Y = "\033[0m", "\033[2m", "\033[1m", "\033[31m", "\033[32m", "\033[33m"
+COLORS = [36, 32, 35, 95, 33, 91, 93, 34, 96, 92]
+PAL = {r["name"]: COLORS[i % len(COLORS)] for i, r in enumerate(teamcfg.load()["roles"].values())}
+HEAD = re.compile(r"^(\d\d:\d\d:\d\d) \[([^\]]+)\] ?(.*)$")
+TOOL = re.compile(r"^> (\S+)\s*(.*)$", re.S)
+
+def col(name):
+    return f"\033[{PAL.get(name, 94 if name.startswith('t') and name[1:].isdigit() else 37)}m"
+
+def emit(entry):
+    ts, who, body = entry
+    w = max(40, shutil.get_terminal_size((100, 30)).columns)
+    tag = f"{D}{ts[:5]}{X} {col(who)}{B}{who}{X} "
+    first, *rest = body.split("\n")
+    m = TOOL.match(first)
+    if m:
+        tool, arg = m.group(1), re.sub(r"\s+", " ", m.group(2) + " " + " ".join(rest)).strip()
+        tool = "Bash" if tool.rsplit("/", 1)[-1] in ("bash", "sh", "zsh") else tool
+        arg = re.sub(r"^-lc ", "", arg)
+        line = f"{tag}{D}⏺ {tool}({arg}"
+        vis = len(f"{ts[:5]} {who} ⏺ {tool}({arg}")
+        if vis > w - 2:
+            line = line[: len(line) - (vis - (w - 3))]
+        print(line + f"){X}" if vis <= w - 2 else line + f"…){X}")
+        return
+    txt = re.sub(r"\s+", " ", " ".join([first] + rest)).strip()
+    color = R if re.search(r"error|failed|escalated|blocked", txt, re.I) else G if txt.startswith("done") else ""
+    pad = " " * (len(f"{ts[:5]} {who} "))
+    lines = textwrap.wrap(txt, max(30, w - len(pad) - 1)) or [""]
+    print(f"{tag}{color}{lines[0]}{X}")
+    for l in lines[1:]:
+        print(f"{pad}{color}{l}{X}")
+
+def feed(lines):
+    cur = None
+    for raw in lines:
+        raw = raw.rstrip("\n")
+        m = HEAD.match(raw)
+        if m:
+            if cur: emit(cur)
+            cur = [m.group(1), m.group(2), m.group(3)]
+        elif cur:
+            cur[2] += "\n" + raw
+        sys.stdout.flush()
+    return cur
+
+if __name__ == "__main__":
+    p = subprocess.Popen(["tail", "-n", "400", "-F", LIVE], stdout=subprocess.PIPE, text=True, errors="ignore", bufsize=1)
+    pending, last = None, None
+    import select, time
+    cur = None
+    while True:
+        r, _, _ = select.select([p.stdout], [], [], 0.7)
+        if r:
+            raw = p.stdout.readline()
+            if not raw: break
+            raw = raw.rstrip("\n"); m = HEAD.match(raw)
+            if m:
+                if cur: emit(cur)
+                cur = [m.group(1), m.group(2), m.group(3)]
+            elif cur:
+                cur[2] += "\n" + raw
+        elif cur:  # idle: flush the pending entry
+            emit(cur); cur = None
+        sys.stdout.flush()

@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+tmp="$(mktemp -d)"
+trap 'rm -rf -- "$tmp"' EXIT
+
+fail() {
+  printf 'error: %s\n' "$1" >&2
+  exit 1
+}
+
+project="$tmp/My Project"
+bin="$tmp/bin"
+export HOME="$tmp/home"
+export GIT_CONFIG_GLOBAL="$tmp/gitconfig"
+export XDG_STATE_HOME="$tmp/state" XDG_CACHE_HOME="$tmp/cache" CODEX_HOME="$tmp/codex"
+mkdir -p "$HOME"
+unset TEAM_CONFIG
+
+dry_output="$("$repo_root/scripts/setup-agent-team.sh" --dry-run --bin-dir "$bin" "$project")"
+grep -q 'dry run complete' <<<"$dry_output" || fail "dry run did not finish"
+[[ ! -e "$project" && ! -e "$bin" ]] || fail "dry run created files"
+
+"$repo_root/scripts/setup-agent-team.sh" --bin-dir "$bin" "$project" >/dev/null
+[[ -f "$project/team.toml" ]] || fail "team.toml was not created"
+grep -q '^name = "My-Project"' "$project/team.toml" || fail "project name was not substituted"
+[[ -L "$bin/team" && -L "$bin/team-up" ]] || fail "launchers were not linked"
+
+second="$("$repo_root/scripts/setup-agent-team.sh" --bin-dir "$bin" "$project")"
+grep -q '0 item(s) added' <<<"$second" || fail "second run was not idempotent"
+
+git -C "$project" init -q
+(cd "$project" && "$bin/team" new --no-run "setup check" >/dev/null && "$bin/team" status | grep -q 'chg:t001') ||
+  fail "installed team command did not create and list a task"
+
+if "$repo_root/scripts/setup-agent-team.sh" --bogus "$project" >/dev/null 2>&1; then
+  fail "unknown option accepted"
+fi
+if "$repo_root/scripts/setup-agent-team.sh" --agents gemini "$tmp/other" >/dev/null 2>&1; then
+  fail "unknown --agents value accepted"
+fi
+
+# Each preset loads and uses the chosen CLIs; an existing repo gets the state dir excluded once.
+for agents in claude codex both; do
+  repo="$tmp/repo-$agents"
+  git init -q "$repo"
+  "$repo_root/scripts/setup-agent-team.sh" --agents "$agents" --bin-dir "$bin" "$repo" >/dev/null 2>&1
+  clis="$(python3 -I -c 'import sys; sys.path.insert(0, sys.argv[1]); import teamcfg
+print(" ".join(sorted({r["cli"] for r in teamcfg.load(sys.argv[2])["roles"].values()})))' \
+    "$repo_root/agent-team" "$repo/team.toml")" || fail "$agents preset does not load"
+  case "$agents" in
+    both) [[ "$clis" == "claude codex" ]] ;;
+    *) [[ "$clis" == "$agents" ]] ;;
+  esac || fail "$agents preset uses: $clis"
+  grep -qxF '/.agent-team/' "$repo/.git/info/exclude" || fail "state dir not excluded for $agents"
+done
+"$repo_root/scripts/setup-agent-team.sh" --bin-dir "$bin" "$tmp/repo-both" >/dev/null 2>&1
+[[ "$(grep -cxF '/.agent-team/' "$tmp/repo-both/.git/info/exclude")" == 1 ]] || fail "exclude entry duplicated"
+
+mkdir "$tmp/repo-both/sub"
+"$repo_root/scripts/setup-agent-team.sh" --agents claude --bin-dir "$bin" "$tmp/repo-both/sub" >/dev/null 2>&1
+grep -qxF '/sub/.agent-team/' "$tmp/repo-both/.git/info/exclude" || fail "subdirectory state dir not excluded"
+
+printf 'agent team setup test passed\n'

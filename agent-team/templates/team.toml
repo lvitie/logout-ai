@@ -1,0 +1,104 @@
+# Agent team config. Copy to your project root as team.toml (scripts/setup-agent-team.sh does this).
+# Paths are relative to this file. See docs/AGENT_TEAM.md.
+
+[project]
+name = "myproject"            # session/notification/chat names
+root = "."                    # workspace root (agents run here)
+state_dir = ".agent-team"     # tasks, live.log, locks, queue; keep out of version control
+docs = ["AGENTS.md", "SPEC.md", "ROADMAP.md", "TASKS.md", "docs/"]  # what the Producer is told to read
+queue_file = "queue.txt"      # optional, relative to state_dir: lines "tNNN: title" shown by focus_tui
+planning_file = "TASKS.md"    # focus_tui reads its "## Current phase"
+templates_dir = ""            # optional dir (relative to root) with jobs/, roles/, vcs/ overrides
+
+[vcs]
+kind = "git"                  # git, or any X with a vcs_X.py adapter
+guard_names = ["git"]         # tools shadowed on the agents' PATH by bin/vcs-guard
+[vcs.deny]                    # subcommands agents may not run per tool, also via aliases; "*" denies the tool entirely
+git = ["commit", "push", "pull", "reset", "checkout", "switch", "stash", "clean", "rebase", "merge", "restore", "add",
+       "rm", "mv", "cherry-pick", "revert", "am", "tag", "config", "worktree", "update-ref", "update-index",
+       "symbolic-ref", "replace", "filter-branch", "gc", "prune", "reflog", "notes", "submodule"]
+[vcs.deny_flags]              # tool -> subcommand -> refused flags (also inside combined short flags like -df)
+git = { branch = ["-D", "-d", "-f", "-M", "-m", "-C", "-c", "-u", "--delete", "--force", "--move", "--copy",
+                  "--set-upstream-to", "--unset-upstream"] }
+
+[agents]
+deny_extra = ["chmod"]        # more Claude Bash(...) deny rules (git commands come from [vcs.deny])
+
+[locks]                       # resources a task may hold; same lock = exclusive, different locks run in parallel
+names = ["shared"]
+default = ["shared"]
+# [locks.gpu]                 # optional free-resource check before running next to other jobs
+# min_free_mib = 9000
+# probe_cmd = ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"]
+# skip_if_holds = "editor"    # no check when this lock is held too
+
+[probes]                      # name = url, shown to agents as "name up/down"
+# service = "http://127.0.0.1:9000/health"
+
+[prompts]
+readonly_note = "Read-only stage: use tools only to inspect, never to change."
+
+[notify]
+app_name = ""                 # default: project name
+sound_dir = ""                # e.g. /usr/share/sounds/freedesktop/stereo; empty = no sound
+sound_normal = "message.oga"
+sound_urgent = "alarm-clock-elapsed.oga"
+
+[usage]
+claude_endpoint = false       # true: usage_tui may call Claude's usage endpoint with Claude Code's OAuth token
+
+# Canonical roles producer, mid, senior, architect, director are required; add more freely.
+# --- roles: scripts/setup-agent-team.sh replaces this block with the claude, codex or both preset ---
+[roles.producer]
+name = "Producer"
+cli = "claude"
+model = "claude-sonnet-5-5"
+effort = "low"
+[roles.mid]
+name = "Mid Dev"
+cli = "claude"
+model = "claude-sonnet-5-5"
+effort = "medium"
+[roles.senior]
+name = "Senior Dev"
+cli = "claude"
+model = "claude-opus-5-5"
+effort = "high"
+[roles.architect]
+name = "Architect"
+cli = "claude"
+model = "claude-opus-5-5"
+effort = "high"
+[roles.director]
+name = "Tech Director"
+cli = "claude"
+model = "claude-opus-5-5"
+effort = "high"
+# --- end roles ---
+
+[routing]
+max_rounds = 2                # failed review rounds before escalating to the user
+max_parallel = 3              # concurrent team runs
+domains = ["code"]            # ROUTE domains the Producer may pick
+review_extra_domains = []     # domains that get one more review ...
+extra_review_routes = ["hard"]  # ... and routes that do
+extra_review_role = "director"
+side_task_reviewer = "architect"  # `team new --role X` skips routing; this role reviews
+side_task_roles = ["mid", "senior"]
+capacity_fallback = {}        # role -> role to retry on when a model reports 503/at capacity
+[routing.domain_roles]        # domain -> role that plans and implements it
+[routing.side_task_domains]   # side-task role -> domain (default: first domain)
+[routing.pipeline]            # [stage kind, role] lists
+simple = [["implement", "mid"], ["review", "architect"]]
+complex = [["plan", "architect"], ["plan_review", "director"], ["implement", "mid"], ["review", "architect"]]
+hard = [["plan", "director"], ["plan_review", "architect"], ["implement", "senior"], ["review", "architect"]]
+[routing.takeover.mid]        # a stronger role takes over implementation after failures
+to = "senior"
+after_reviews = 1
+after_attempt = true
+[routing.after_impl_fails]
+# fails = 3
+# role = "senior"
+[routing.usage]               # Claude/Codex plan balancing; needs both CLIs and usage_tui data
+enabled = false
+limits = { "5h" = 90.0, "7d" = 95.0 }   # percent used at which Claude roles fall back to Codex

@@ -1,0 +1,162 @@
+# Example: the original Unreal + Perforce team this system was extracted from. Copy to the project root as
+# team.toml, copy roles/ to <templates_dir>/roles/ and adjust. Models and rules are the source project's, not defaults.
+[project]
+name = "inferno"
+root = "."
+state_dir = "Inferno/Saved/AgentTeam"
+docs = ["SPEC.md", "ROADMAP.md", "TASKS.md", "docs/"]
+templates_dir = "Inferno/Tools/AgentTeam"   # holds roles/ (copied from examples/unreal-p4/roles)
+
+[vcs]
+kind = "p4"
+guard_names = ["p4", "git"]
+[vcs.deny]
+p4 = ["submit", "revert", "shelve", "unshelve", "obliterate", "sync", "clean", "flush", "integrate", "copy", "merge", "populate"]
+git = ["*"]
+[vcs.deny_flags]
+p4 = { change = ["-d", "-f"], changelist = ["-d", "-f"] }
+
+[agents]
+deny_extra = ["chmod"]
+
+[locks]
+names = ["editor", "gpu"]
+default = ["editor"]
+[locks.gpu]
+min_free_mib = 9000
+probe_cmd = ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"]
+skip_if_holds = "editor"
+
+[probes]
+editor = "http://127.0.0.1:8000/mcp"
+comfyui = "http://127.0.0.1:8189/system_stats"
+
+[prompts]
+readonly_note = "Read-only stage: use MCP (unreal-mcp, comfy-mcp) only to inspect, never to change."
+
+[notify]
+app_name = "Inferno"
+sound_dir = "/run/current-system/sw/share/sounds/freedesktop/stereo"
+
+[roles.producer]
+name = "Producer"
+cli = "claude"
+model = "claude-sonnet-5-5"
+effort = "low"
+[roles.mid]
+name = "Mid Dev"
+cli = "codex"
+model = "gpt-6.1-sol"
+effort = "high"
+[roles.senior]
+name = "Senior Dev"
+cli = "claude"
+model = "claude-opus-5-5"
+effort = "xhigh"
+[roles.architect]
+name = "Architect"
+cli = "codex"
+model = "gpt-6-astra"
+effort = "high"
+[roles.director]
+name = "Tech Director"
+cli = "claude"
+model = "claude-fable-5-1"
+effort = "high"
+[roles.senior2]
+name = "Senior Dev 2"
+cli = "codex"
+model = "gpt-6.1-sol"
+effort = "xhigh"
+[roles.director2]
+name = "Tech Director 2"
+cli = "codex"
+model = "gpt-6-astra"
+effort = "xhigh"
+[roles.leveldesigner]
+name = "Level Designer"
+cli = "claude"
+model = "claude-sonnet-5-5"
+effort = "high"
+[roles.mid_claude]
+name = "Mid Dev (Claude)"
+cli = "claude"
+model = "claude-sonnet-5-5"
+effort = "medium"
+[roles.architect_claude]
+name = "Architect (Claude)"
+cli = "claude"
+model = "claude-opus-5-5"
+effort = "high"
+[roles.artdirector]
+name = "Art Director"
+cli = "claude"
+model = "claude-sonnet-5-5"
+effort = "medium"
+[roles.artist]
+name = "Artist"
+cli = "claude"
+model = "claude-sonnet-5-5"
+effort = "medium"
+[roles.senior_astra]
+name = "Senior Dev (Astra)"
+cli = "codex"
+model = "gpt-6-astra"
+effort = "high"
+[roles.architect2]
+name = "Architect 2"
+cli = "codex"
+model = "gpt-6.1-sol"
+effort = "xhigh"
+
+[routing]
+domains = ["code", "mesh", "anim", "material", "level"]
+review_extra_domains = ["mesh", "anim", "material", "level"]
+extra_review_routes = ["hard"]
+extra_review_role = "director"
+side_task_reviewer = "architect"
+side_task_roles = ["leveldesigner", "artdirector", "artist", "mid", "senior", "architect_claude"]
+capacity_fallback = { architect = "architect2", architect2 = "director", director2 = "director", mid = "senior", senior2 = "senior" }
+[routing.domain_roles]
+level = "leveldesigner"
+[routing.side_task_domains]
+artist = "mesh"
+[routing.pipeline]
+simple = [["implement", "mid"], ["review", "architect"]]
+complex = [["plan", "architect"], ["plan_review", "director"], ["implement", "mid"], ["review", "architect"]]
+hard = [["plan", "director"], ["plan_review", "architect"], ["implement", "senior"], ["review", "architect"]]
+[routing.takeover.mid]
+to = "senior"
+after_reviews = 1
+after_attempt = true
+[routing.takeover.leveldesigner]
+to = "senior"
+after_reviews = 2
+[routing.after_impl_fails]
+fails = 3
+role = "senior_astra"
+[routing.usage]
+enabled = true
+claude_fallback = { producer = "mid", senior = "senior2", director = "director2", leveldesigner = "mid" }
+limits = { "5h" = 90.0, "7d" = 95.0 }
+cheap_first = ["senior"]
+burst_file = "fable_burst_until"
+no_burst_effort = { senior = "medium" }
+[routing.usage.scoped_limit]
+label = "7d Fable"
+threshold = 85.0
+role = "director"
+[routing.usage.surplus_swap]
+mid = "mid_claude"
+architect = "architect_claude"
+director2 = "director2"
+senior2 = "senior"
+[routing.usage.burst_swap]
+mid = "senior"
+architect = "director"
+director2 = "director"
+[routing.usage.escalation_gate]
+role = "director"
+first = "architect"
+second_review = "architect_claude"
+after_rounds = 2

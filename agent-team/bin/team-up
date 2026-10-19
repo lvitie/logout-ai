@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+# Agent team dashboard for the project that owns team.toml (found via $TEAM_CONFIG or the current directory upwards).
+# No args: open or reattach the zellij session. With a request: start a task.
+#   team-up
+#   team-up "add a stamina bar to the HUD"
+set -euo pipefail
+here="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+eval "$(python3 "$here/teamcfg.py" --shell)"
+export TEAM_CONFIG PATH="$here/bin:$PATH"
+cd "$TEAM_ROOT"
+mkdir -p "$TEAM_STATE" && touch "$TEAM_STATE/live.log"
+
+if [[ $# -gt 0 ]]; then
+  exec team new "$*"
+fi
+session="${TEAM_NAME}-team"
+layout="$TEAM_STATE/team.kdl"
+sed "s#@@AGENT_TEAM@@#$here#g" "$here/templates/team.kdl" >"$layout"
+if [[ -n ${ZELLIJ:-} ]]; then
+  exec zellij action new-tab --layout "$layout" --name team
+fi
+if zellij list-sessions --no-formatting 2>/dev/null | grep "^$session " | grep -qv EXITED; then
+  exec zellij attach "$session"
+fi
+zellij delete-session "$session" >/dev/null 2>&1 || true # drop an exited session so the layout is fresh
+exec zellij --session "$session" --new-session-with-layout "$layout"

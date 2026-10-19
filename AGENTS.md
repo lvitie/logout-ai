@@ -76,6 +76,7 @@ Read only the documents needed for the task:
 - `docs/CODEX_LAYOUT.md` for Codex discovery and installation boundaries.
 - `docs/SKILLS.md` when creating or changing skills.
 - `docs/WORKFLOW.md` when changing the repository development workflow.
+- `docs/AGENT_TEAM.md` when changing or installing the `agent-team/` multi-agent coordinator.
 
 ## Verification
 
@@ -86,6 +87,7 @@ Read only the documents needed for the task:
   rendered output.
 - Run `./scripts/validate.sh` after changing configuration, skills, install
   scripts, or repository layout.
+- Run `python3 -I -m unittest discover agent-team/tests` and `./scripts/test-setup-agent-team.sh` after changing `agent-team/`.
 - Run `./scripts/test-install.sh` directly when diagnosing Linux or macOS
   installer behavior. Windows installer behavior is covered by
   `./scripts/test-install.ps1` in CI.
