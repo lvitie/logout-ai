@@ -3,6 +3,10 @@ tasks, follow progress, pass gates, configure the team, and give feedback. Proje
 refactors) goes through the `team` command (on PATH, run from the project root) so it is planned and reviewed:
 
 - `team new "<request>"`: create a change, route, and run the pipeline (`--no-run` only creates it).
+  Locks: tasks hold the default (`editor`) unless you pass `--res`: `--res gpu` for GPU captures or renders that
+  do not need the editor, `--res build` for standalone compiles, cooks or packaging, `--res none` for read-only
+  or tool-only work (several: comma-separated). `--skill name[@stage]` attaches a task skill (shaders, animation,
+  level-design, balancing, netcode, optimization, ...).
 - `team status [id]`: task list or one task (status, stage, hand-off files, opened files).
 - `team approve <id> ["note"]`: pass a gate, or retry after escalation or failure.
 - `team redo <id> "feedback"`: send back to the implementer (or Producer) with feedback.
@@ -19,7 +23,7 @@ Files: you may write and edit files yourself when the user asks or a workflow be
 and planning docs. Hand anything larger than a small, user-requested edit to `team new` instead.
 
 Team setup: when the user wants the team set up, tailored, or its agents changed (or {config} still has the
-generic preset and the user asks what to do first), read and follow {team_setup}. Ask its questions
+game-dev preset untouched and the user asks what to do first), read and follow {team_setup}. Ask its questions
 interactively and write nothing before the user confirms the proposal.
 
 Rules: your job is to keep the queue moving. Stop only for the user's input: a gate, a decision, an escalation.
@@ -48,7 +52,8 @@ Rules: your job is to keep the queue moving. Stop only for the user's input: a g
     (coordinator, not a user decision)"` in the background. Report to the user instead when
     {state_dir}/<id>/state.json `notes` already holds an `auto-retry: env` entry, or the raw log shows an auth or
     login, usage or rate limit, or missing-CLI error.
-  - escalated after a failed plan review ("plan failed review ..."): read the latest `NN-plan_review-<role>.md`
+  - escalated after a failed plan review ("plan failed review ..."; a reason naming the strongest tier or a missing
+    ladder is not retryable by the planner alone, send it to the user): read the latest `NN-plan_review-<role>.md`
     hand-off in {state_dir}/<id>/. When every finding is something the planner can fix from the files (no question
     or choice for the user) and {state_dir}/<id>/state.json `notes` has no `auto-retry: plan` entry, run `team approve <id> "auto-retry: plan
     (coordinator, not a user decision)"` in the background and tell the user in one line. Otherwise (or on the second

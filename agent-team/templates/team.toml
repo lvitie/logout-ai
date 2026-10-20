@@ -8,31 +8,31 @@ state_dir = ".agent-team"     # tasks, live.log, locks, queue; keep out of versi
 docs = ["AGENTS.md", "SPEC.md", "ROADMAP.md", "TASKS.md", "docs/"]  # what the Producer is told to read
 queue_file = "queue.txt"      # optional, relative to state_dir: lines "tNNN: title [(after tNNN)]", queue order
 planning_file = "TASKS.md"    # focus_tui reads its "## Current phase"
-templates_dir = ""            # optional dir (relative to root) with jobs/, roles/, vcs/ overrides
+templates_dir = ""            # optional dir (relative to root) with jobs/, agents/, roles/, vcs/ overrides
 team_setup = ""               # date the team-setup skill finished; empty: the coordinator offers it first
 
 [vcs]
-kind = "git"                  # git, p4, none, or any X with a vcs_X.py adapter
-guard_names = ["git"]         # tools shadowed on the agents' PATH by bin/vcs-guard
+kind = "p4"                   # git, p4, none, or any X with a vcs_X.py adapter; setup rewrites this block for git or none
+guard_names = ["p4", "git"]   # tools shadowed on the agents' PATH by bin/vcs-guard
 [vcs.deny]                    # subcommands agents may not run per tool, also via aliases; "*" denies the tool entirely
-git = ["commit", "push", "pull", "reset", "checkout", "switch", "stash", "clean", "rebase", "merge", "restore", "add",
-       "rm", "mv", "cherry-pick", "revert", "am", "tag", "config", "worktree", "update-ref", "update-index",
-       "symbolic-ref", "replace", "filter-branch", "gc", "prune", "reflog", "notes", "submodule"]
+p4 = ["submit", "revert", "shelve", "unshelve", "obliterate", "sync", "clean", "flush", "integrate", "integ",
+      "copy", "merge", "populate"]
+git = ["*"]
 [vcs.deny_flags]              # tool -> subcommand -> refused flags (also inside combined short flags like -df)
-git = { branch = ["-D", "-d", "-f", "-M", "-m", "-C", "-c", "-u", "--delete", "--force", "--move", "--copy",
-                  "--set-upstream-to", "--unset-upstream"] }
+p4 = { change = ["-d", "-f"], changelist = ["-d", "-f"] }
 
 [agents]
 deny_extra = ["chmod"]        # more Claude Bash(...) deny rules (git commands come from [vcs.deny])
 
 [locks]                       # resources a task may hold; same lock = exclusive, different locks run in parallel
-names = ["shared"]
-default = ["shared"]          # every task holds these: one shared lock means tasks run one at a time; add per-area
-                              # locks (and make default narrower) to run in parallel
-# [locks.gpu]                 # optional free-resource check before running next to other jobs
-# min_free_mib = 9000
-# probe_cmd = ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"]
-# skip_if_holds = "editor"    # no check when this lock is held too
+names = ["editor", "gpu", "build"]
+default = ["editor"]          # every task holds these (the editor/project is the serial resource). `team new --res
+                              # gpu|build|none` picks others: gpu = GPU-heavy captures or renders without the editor,
+                              # build = standalone compiles/cooks/packaging; none = read-only or tool-only work
+[locks.gpu]                   # free-resource check before running next to other jobs (skipped without nvidia-smi)
+min_free_mib = 9000
+probe_cmd = ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"]
+skip_if_holds = "editor"      # no check when this lock is held too
 
 [queue]                       # refill: when the queue runs low the Producer proposes the next tasks from the plan
 refill = true                 # proposals become pNNN lines in queue_file; nothing runs until `team promote`
@@ -62,7 +62,8 @@ sound_urgent = "alarm-clock-elapsed.oga"
 [usage]
 claude_endpoint = false       # true: usage_tui may call Claude's usage endpoint with Claude Code's OAuth token
 
-# Canonical roles producer, mid, senior, architect, director are required; add more freely.
+# Canonical roles producer, mid, senior, architect, director are required; add more freely. The model/effort ladder
+# (low, mid, high, top, apex) and how to retune it: docs/MODEL_LADDER.md. apex is reached by escalation only.
 # --- roles: scripts/setup-agent-team.sh replaces this block with the claude, codex or both preset ---
 [roles.producer]
 name = "Producer"
@@ -88,33 +89,117 @@ effort = "high"
 name = "Tech Director"
 cli = "claude"
 model = "claude-opus-5-5"
+effort = "xhigh"
+[roles.mid_high]
+name = "Mid Dev (high)"
+cli = "claude"
+model = "claude-sonnet-5-5"
+effort = "high"
+[roles.apex]
+name = "Apex"
+cli = "claude"
+model = "claude-fable-5-1"
 effort = "high"
 # --- end roles ---
 
 [routing]
-max_rounds = 2                # failed review rounds before escalating to the user
+max_rounds = 2                # minor failed review rounds per target (plan, implement) before escalating to the user
 max_parallel = 3              # concurrent team runs
 long_stage_min = 120          # team wait and the alerts pane flag a stage running longer (0 = never)
-domains = ["code"]            # ROUTE domains the Producer may pick
-review_extra_domains = []     # domains that get one more review ...
+domains = ["gameplay", "engine", "tools", "technical_art", "audio", "design", "build"]  # ROUTE domains the Producer may pick
+review_extra_domains = ["technical_art", "audio"]  # domains that get one more review ...
 extra_review_routes = ["hard"]  # ... and routes that do
 extra_review_role = "director"
 side_task_reviewer = "architect"  # `team new --role X` skips routing; this role reviews
-side_task_roles = ["mid", "senior"]
+side_task_roles = ["mid", "senior", "gameplay", "engine", "tools", "technical_artist", "audio", "designer", "qa", "build_release"]
 capacity_fallback = {}        # role -> role to retry on when a model reports 503/at capacity
-[routing.domain_roles]        # domain -> role that plans and implements it
+# Per-domain stage agents: plan, plan_review, implement, review name agents (templates/agents files or [roles] keys).
+# Agents are discipline identity (prompt, scope); the model/effort of each stage comes from the route's role profile and
+# [heuristic], not from the agent. plan_review != plan, review != implement; none reviews with director (hard routes add it).
+# [routing.domain_roles] is deprecated: domain = agent is plan + implement.
+[routing.domain.gameplay]
+plan = "gameplay"
+plan_review = "engine"
+implement = "gameplay"
+review = "qa"
+[routing.domain.engine]
+plan = "engine"
+plan_review = "architect"
+implement = "engine"
+review = "architect"
+[routing.domain.tools]
+plan = "tools"
+plan_review = "architect"
+implement = "tools"
+review = "engine"
+[routing.domain.technical_art]
+plan = "technical_artist"
+plan_review = "engine"
+implement = "technical_artist"
+review = "qa"
+[routing.domain.audio]
+plan = "audio"
+plan_review = "engine"
+implement = "audio"
+review = "qa"
+[routing.domain.design]
+plan = "designer"
+plan_review = "gameplay"
+implement = "designer"
+review = "qa"
+[routing.domain.build]
+plan = "build_release"
+plan_review = "engine"
+implement = "build_release"
+review = "tools"
 [routing.side_task_domains]   # side-task role -> domain (default: first domain)
+technical_artist = "technical_art"
+audio = "audio"
+designer = "design"
+engine = "engine"
+tools = "tools"
+build_release = "build"
+qa = "gameplay"
 [routing.pipeline]            # [stage kind, role] lists
 simple = [["implement", "mid"], ["review", "architect"]]
 complex = [["plan", "architect"], ["plan_review", "director"], ["implement", "mid"], ["review", "architect"]]
 hard = [["plan", "director"], ["plan_review", "architect"], ["implement", "senior"], ["review", "architect"]]
-[routing.takeover.mid]        # a stronger role takes over implementation after failures
-to = "senior"
-after_reviews = 1
-after_attempt = true
+# Escalation: a reviewer's SEVERITY major/critical (or ESCALATE: yes) retries the same agent one tier up the
+# [heuristic.tiers] ladder; at the strongest tier, or with no ladder, a pin or a role_override, it goes to the user.
+# [routing.takeover.<role>] (after_reviews, after_attempt; `to` optional) steps the same agent up once; with `to`
+# a different (non-reviewing) agent takes over instead. [routing.after_impl_fails] steps up once at `fails` failures.
+# [routing.takeover.mid]
+# after_reviews = 1
 [routing.after_impl_fails]
 # fails = 3
-# role = "senior"
+# Model/effort heuristic. Tiers are ranks, weakest first; each names a [roles] profile per cli. Rules run top
+# to bottom and set a minimum (tier and/or effort); the highest wins; the stage's own profile is a floor (at its rank it
+# runs unchanged), so a ladder without rules only acts on escalation. when keys: route
+# (simple|complex|hard|custom), domain, risk (low|medium|high), size (small|medium|large), stage (route|plan|
+# plan_review|implement|review), failures_min (rejected plans + implementations), usage (low|claude|codex|mixed; only
+# with fresh [routing.usage] data). A value may be a list. Agent frontmatter model/effort is a floor; `pin = true`
+# makes it exact. Each launch logs the rule in live.log and in state.json (launches[].heuristic).
+# Example rule: when = { risk = "high", size = ["medium", "large"] }, min = { tier = "high", effort = "high" }
+# --- ladder: the tier ladder escalation steps up (scripts/setup-agent-team writes it per agent preset; without it a major review failure goes to the user) ---
+[heuristic.tiers]
+low  = { claude = "mid" }
+mid  = { claude = "mid_high" }
+high = { claude = "senior" }
+top  = { claude = "director" }
+apex = { claude = "apex" }
+# --- end ladder ---
+[[heuristic.rule]]
+name = "hard-route"
+when = { route = "hard" }
+min  = { tier = "high", effort = "high" }
+[[heuristic.rule]]
+name = "high-risk"
+when = { risk = "high", size = ["medium", "large"], route = ["complex", "hard"] }
+min  = { tier = "high" }
+[[heuristic.rule]]
+name = "repeat-failures"
+when = { failures_min = 2 }
+min  = { tier = "high" }
 [routing.usage]               # Claude/Codex plan balancing; needs both CLIs and usage_tui data
 enabled = false
 limits = { "5h" = 90.0, "7d" = 95.0 }   # percent used at which Claude roles fall back to Codex

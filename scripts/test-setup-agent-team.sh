@@ -59,6 +59,20 @@ c = teamcfg.load(sys.argv[2])["vcs"]; print(c["kind"], *c["guard_names"], *c["de
 [[ "$vcs_kind" == "p4 p4 git *" ]] || fail "p4 preset has vcs: $vcs_kind"
 ! grep -qxF '/.agent-team/' "$tmp/repo-p4/.git/info/exclude" || fail "git exclude written for a p4 project"
 
+# Perforce dry run: names the p4 preset and writes nothing.
+p4_dry="$("$repo_root/scripts/setup-agent-team.sh" --dry-run --agents claude --vcs p4 --bin-dir "$bin" "$tmp/dry-p4" 2>&1)"
+grep -q 'vcs=p4' <<<"$p4_dry" || fail "p4 dry run did not name the vcs"
+[[ ! -e "$tmp/dry-p4" ]] || fail "p4 dry run created files"
+
+# The generated config starts from the game-dev defaults: domains, locks, agents, skills and the heuristic rules.
+defaults="$(python3 -I -c 'import sys; sys.path.insert(0, sys.argv[1]); import teamcfg
+c = teamcfg.load(sys.argv[2]); R = c["routing"]
+print(len(R["domains"]), len(R["domain"]), *c["locks"]["names"], *c["locks"]["default"], len(c["heuristic"]["rules"]),
+      all(a in c["agent_defs"] for a in ("designer", "gameplay", "engine", "tools", "technical_artist", "audio", "qa", "build_release")),
+      all(s in teamcfg.list_skills(c) for s in ("shaders", "animation", "level-design", "balancing", "netcode", "optimization")))' \
+  "$repo_root/agent-team" "$tmp/repo-p4/team.toml")" || fail "game-dev defaults do not load"
+[[ "$defaults" == "7 7 editor gpu build editor 3 True True" ]] || fail "game-dev defaults: $defaults"
+
 # No VCS: kind none, no guard, no deny rules, and no git exclude entry even inside a git repository.
 git init -q "$tmp/repo-none"
 "$repo_root/scripts/setup-agent-team.sh" --agents claude --vcs none --bin-dir "$bin" "$tmp/repo-none" >/dev/null 2>&1
@@ -81,6 +95,11 @@ print(" ".join(sorted({r["cli"] for r in teamcfg.load(sys.argv[2])["roles"].valu
     *) [[ "$clis" == "$agents" ]] ;;
   esac || fail "$agents preset uses: $clis"
   grep -qxF '/.agent-team/' "$repo/.git/info/exclude" || fail "state dir not excluded for $agents"
+  # The escalation ladder: written per preset, loads without warnings, five tiers weakest first.
+  tiers="$(python3 -I -W error -c 'import sys; sys.path.insert(0, sys.argv[1]); import teamcfg
+print(" ".join(t["name"] for t in teamcfg.load(sys.argv[2])["heuristic"]["tiers"]))' \
+    "$repo_root/agent-team" "$repo/team.toml")" || fail "$agents preset has no loadable tier ladder"
+  [[ "$tiers" == "low mid high top apex" ]] || fail "$agents preset has tiers: $tiers"
 done
 "$repo_root/scripts/setup-agent-team.sh" --bin-dir "$bin" "$tmp/repo-both" >/dev/null 2>&1
 [[ "$(grep -cxF '/.agent-team/' "$tmp/repo-both/.git/info/exclude")" == 1 ]] || fail "exclude entry duplicated"

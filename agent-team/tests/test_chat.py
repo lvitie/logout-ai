@@ -7,6 +7,8 @@ import sys
 import tempfile
 import unittest
 
+from cfgutil import config_text
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -19,7 +21,7 @@ class ChatTests(unittest.TestCase):
                 project.mkdir()
                 fake = root / 'bin'
                 fake.mkdir()
-                config = (ROOT / 'templates/team.toml').read_text().replace('cli = "claude"', f'cli = "{cli}"')
+                config = config_text(cli)
                 (project / 'team.toml').write_text(config)
                 for name in ('claude', 'codex'):
                     path = fake / name
@@ -36,7 +38,7 @@ class ChatTests(unittest.TestCase):
                 self.assertEqual(record['cli'], cli)
                 self.assertEqual(record['cwd'], str(project))
                 self.assertEqual(record['args'][-1], 'request with spaces')
-                self.assertIn('claude-sonnet-5-5', record['args'])
+                self.assertIn({'claude': 'claude-sonnet-5-5', 'codex': 'gpt-6.1-sol'}[cli], record['args'])
                 if cli == 'codex':
                     self.assertEqual(record['args'][:2], ['-s', 'danger-full-access'])  # `team` needs it
                     options = dict(arg.split('=', 1) for arg in record['args'] if '=' in arg)
@@ -59,7 +61,7 @@ class ChatTests(unittest.TestCase):
             root = Path(tmp)
             fake = root / 'bin'
             fake.mkdir()
-            (root / 'team.toml').write_text((ROOT / 'templates/team.toml').read_text()
+            (root / 'team.toml').write_text(config_text()
                                             .replace('team_setup = ""', 'team_setup = "2026-10-19"'))
             (fake / 'claude').write_text(f'#!{sys.executable}\nimport json, sys\nprint(json.dumps(sys.argv[1:]))\n')
             (fake / 'claude').chmod(0o755)

@@ -104,6 +104,16 @@ def holds_run_lock(d):
             return True
 
 
+def latest_launch(s, stem):
+    """The s["launches"] record of a stem (agent, profile, cli, model, effort), None for tasks from before them."""
+    return next((x for x in reversed(s.get("launches", [])) if x.get("stem") == stem), None)
+
+
+def logs_stem(s):
+    prompts = sorted(s["dir"].glob("logs/*.prompt.md"), key=lambda p: p.name)
+    return prompts[-1].name.removesuffix(".prompt.md") if prompts else ""
+
+
 def stage_info(s, now):
     """(kind, planned role, actual role or None, effort)."""
     if s["stage"] is None or s["stage"] < 0:
@@ -117,19 +127,23 @@ def stage_info(s, now):
             return "end", "", None, ""
         kind, planned = stages[s["stage"]]
     prompts = sorted(s["dir"].glob("logs/*.prompt.md"), key=lambda p: p.name)
-    actual = None
+    actual = launch = None
     if prompts:  # the agent the router picked for this stage (routing may swap the planned role)
         m = re.match(r"\d+-(\w+?)-(\w+)\.prompt\.md$", prompts[-1].name)
         try:
             fresh = prompts[-1].stat().st_mtime >= (s.get("stage_started") or 0) - 5
         except OSError:
             fresh = False
-        if m and m[1] == kind and m[2] in team.ROLES and fresh:
-            actual = m[2]
+        launch = latest_launch(s, prompts[-1].name.removesuffix(".prompt.md"))
+        if m and m[1] == kind and fresh:
+            if launch:
+                actual = launch["agent"]
+            elif m[2] in team.ROLES:  # a task from before launch records
+                actual = m[2]
     role = actual or planned
-    effort = team.ROLES.get(role, ("", "", "", ""))[3]
+    effort = launch["effort"] if actual and launch else team.ROLES.get(role, ("", "", "", ""))[3]
     no_burst = team.CFG["routing"]["usage"]["no_burst_effort"]
-    if role in no_burst and not team.burst_active():
+    if not (actual and launch) and role in no_burst and not team.burst_active():
         effort = no_burst[role]
     return kind, planned, actual, effort
 
@@ -147,7 +161,8 @@ def last_line(s, live_tail):
     """The newest summarized event from the task's agent log, else its newest live.log line."""
     logs = sorted(s["dir"].glob("logs/*.jsonl"), key=lambda p: p.name)
     if logs:
-        cli = team.ROLES.get(logs[-1].stem.split("-", 2)[-1], ("", "claude"))[1]
+        launch = latest_launch(s, logs[-1].stem)
+        cli = launch["cli"] if launch else team.ROLES.get(logs[-1].stem.split("-", 2)[-1], ("", "claude"))[1]
         for ln in reversed(tail(logs[-1], 65536)):
             try:
                 msg, _ = team.summarize(cli, json.loads(ln))
@@ -212,7 +227,8 @@ def frame(now, width, height, pending=None, err=None, running_ids=None):
     for s in running:
         kind, planned, actual, effort = stage_info(s, now)
         role = actual or planned
-        model = team.ROLES.get(role, ("", "", "?"))[2].replace("claude-", "")
+        launch = latest_launch(s, logs_stem(s)) if actual else None
+        model = (launch["model"] if launch else team.ROLES.get(role, ("", "", "?"))[2]).replace("claude-", "")
         ov = overrides.get(s["id"]) if isinstance(overrides.get(s["id"]), dict) else {}
         swap = f"{planned}→{role}" + (" ov" if role in ov.values() else "") if actual and actual != planned else role
         rounds = s["plan_rounds"] if kind.startswith("plan") else s["review_rounds"]

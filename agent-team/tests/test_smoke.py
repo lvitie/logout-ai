@@ -16,7 +16,7 @@ sys.path.insert(0, str(ROOT))
 import teamcfg  # noqa: E402
 import vcs  # noqa: E402
 
-TOML = (ROOT / "templates/team.toml").read_text()
+from cfgutil import TOML  # noqa: E402
 
 
 class Project(unittest.TestCase):
@@ -63,8 +63,8 @@ class Project(unittest.TestCase):
         (self.proj / "bad.toml").write_text(bad)
         with self.assertRaisesRegex(ValueError, "director"):
             teamcfg.load(self.proj / "bad.toml")
-        (self.proj / "typo.toml").write_text(TOML.replace('# fails = 3\n# role = "senior"', 'fails = 3\nrole = "senoir"'))
-        with self.assertRaisesRegex(ValueError, "after_impl_fails.*senoir"):
+        (self.proj / "typo.toml").write_text(TOML.replace("# fails = 3", "fails = 0"))
+        with self.assertRaisesRegex(ValueError, "after_impl_fails.*fails"):
             teamcfg.load(self.proj / "typo.toml")
 
     def test_config_flag_beats_env(self):
@@ -79,7 +79,7 @@ class Project(unittest.TestCase):
         r = self.team("new", "--no-run", "add a thing\nmore detail")
         self.assertIn("t001", r.stdout)
         state = json.loads((self.proj / ".agent-team/t001/state.json").read_text())
-        self.assertEqual((state["change"], state["status"], state["res"]), ("t001", "new", ["shared"]))
+        self.assertEqual((state["change"], state["status"], state["res"]), ("t001", "new", ["editor"]))
         listing = self.team("status").stdout
         self.assertIn("t001", listing)
         self.assertIn("chg:t001", listing)
@@ -92,7 +92,8 @@ class Project(unittest.TestCase):
         prompt = (self.proj / ".agent-team/t001/logs/01-route-producer.prompt.md").read_text()
         self.assertIn("working-tree changes t001", prompt)
         self.assertIn("simple|complex|hard|ask", prompt)
-        self.assertIn("DOMAIN: code", prompt)
+        self.assertIn("DOMAIN: gameplay|engine|tools|technical_art|audio|design|build", prompt)
+        self.assertIn("- technical_art: technical art", prompt)
         self.assertNotIn("{", prompt.split("## Job")[1])
         self.assertTrue((self.proj / ".agent-team/guard-bin/git").is_symlink())
 
@@ -134,11 +135,11 @@ class Project(unittest.TestCase):
         self.team("new", "--no-run", "already running")
         self.set_state("t002", status="running")
         with (self.proj / ".agent-team/t002/.lock-run").open("a") as run, \
-                (self.proj / ".agent-team/.lock-shared").open("a") as shared:
+                (self.proj / ".agent-team/.lock-editor").open("a") as editor:
             teamcfg.lock(run, blocking=False)  # stand in for the process advancing t002 with the default lock
-            teamcfg.lock(shared, blocking=False)
+            teamcfg.lock(editor, blocking=False)
             r = self.team("new", "third")
-            self.assertIn("queued: resource 'shared' is busy", r.stdout)
+            self.assertIn("queued: resource 'editor' is busy", r.stdout)
             self.assertEqual(self.state("t003")["status"], "new")
             self.set_state("t001", status="gate", reason="Senior Dev: confirm the API")
             self.team("approve", "t001", "go ahead")
@@ -166,8 +167,9 @@ class Project(unittest.TestCase):
 
     def test_queue_skips_probe_blocked_tasks(self):
         cfg = self.proj / "team.toml"
-        cfg.write_text(cfg.read_text().replace('names = ["shared"]', 'names = ["shared", "gpu"]')
-                       .replace("# [locks.gpu]", '[locks.gpu]\nmin_free_mib = 100\nprobe_cmd = ["echo", "10"]\n#')
+        cfg.write_text(cfg.read_text().replace("min_free_mib = 9000", "min_free_mib = 100")
+                       .replace('probe_cmd = ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"]',
+                                'probe_cmd = ["echo", "10"]')
                        .replace("max_parallel = 3", "max_parallel = 1"))
         self.team("new", "--no-run", "--res", "gpu", "needs the gpu")
         self.team("new", "--no-run", "plain")
@@ -252,10 +254,10 @@ class Project(unittest.TestCase):
 
     def test_approve_escalated_review_retries_the_implementation(self):
         self.team("new", "--no-run", "x")
-        self.set_state("t001", route="simple", domain="code", stage=1, status="escalated", review_rounds=3,
+        self.set_state("t001", route="simple", domain="gameplay", stage=1, status="escalated", review_rounds=3,
                        reason="implement failed review 3 times")
         self.team("approve", "t001", "try again")
-        self.assertTrue((self.proj / ".agent-team/t001/logs/01-implement-mid.prompt.md").exists())
+        self.assertTrue((self.proj / ".agent-team/t001/logs/01-implement-gameplay.prompt.md").exists())
 
     def test_agent_leftovers_are_reaped(self):
         pidfile = Path(self.tmp.name) / "bg.pid"
@@ -295,7 +297,7 @@ class Project(unittest.TestCase):
         team.init(self.proj / "team.toml")
         (self.proj / ".agent-team/t001").mkdir(parents=True)  # another `team new` claimed t001 after our listing
         with mock.patch.object(Path, "glob", return_value=[]), mock.patch("os.environ", self.env):
-            team.cmd_new(SimpleNamespace(request="second", res="", role=None, no_run=True))
+            team.cmd_new(SimpleNamespace(request="second", res="", role=None, no_run=True, skill=[]))
         self.assertEqual(self.state("t002")["request"], "second")
         self.assertFalse((self.proj / ".agent-team/t001/state.json").exists())
 

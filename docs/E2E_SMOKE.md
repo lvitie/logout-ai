@@ -141,15 +141,16 @@ grep -n team_setup team.toml     # [project] team_setup = ""  (empty before the 
 - Expect: rounds of at most four grouped questions, each waiting for your answer. Claude uses its question tool with
   options (recommended first). Codex uses `request_user_input` or one numbered list, then waits.
 - Expect: the first round asks you to confirm workspace (root, VCS, branch).
-- Cover: work/domains, specialists, agents and budget, locks/probes, rules, queue autonomy. Give concrete answers,
+- Cover: which default domains to keep (remove one and check `team status` still loads), specialists, agents and budget, locks/probes, rules, queue autonomy. Give concrete answers,
   including one specialist role and one lock.
 - Expect: nothing is written yet. Check: `git status --short` and `git diff --stat team.toml` show no change.
 
 ### B3. Proposal and confirm
 
-- Expect: a proposal listing roles (cli, model, effort), `domains`, `domain_roles`, `side_task_roles`, `[locks]`,
+- Expect: a proposal that starts from the game-dev defaults (seven domains with their stage agents, the discipline agents, the
+  `editor`/`gpu`/`build` locks, `p4`) and asks only what to confirm or change: roles (cli, model, effort), `domains`, `side_task_roles`, `[locks]`,
   `max_parallel`, `[probes]`, shared rules, and the files it will write. Ask for one change and check it is applied.
-- Confirm. Expect writes to `team.toml`, `<templates_dir>/roles/*.md` (including `common.md` for the rules) and, for
+- Confirm. Expect writes to `team.toml`, `<templates_dir>/agents/*.md` and `roles/common.md` (the rules) and, for
   non-default queue autonomy, `<templates_dir>/coordinator-policy.md`.
 
 ### B4. Verify the result

@@ -10,7 +10,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 GUARD = ROOT / "bin/vcs-guard"
-TOML = (ROOT / "templates/team.toml").read_text()
+from cfgutil import TOML  # noqa: E402
 
 
 class GuardScope(unittest.TestCase):

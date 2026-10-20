@@ -22,15 +22,15 @@ import teamcfg  # noqa: E402
 import vcs as vcsmod  # noqa: E402
 
 CLIP = 6000  # max chars of any hand-off inlined into a prompt
-_usage = {"t": 0.0, "low": False, "mode": "mixed"}
+_usage = {"t": 0.0, "ok_t": 0.0, "fail": True, "low": False, "mode": "mixed"}  # ok_t: last good fetch
 H, P_MAX_X, WASTE, HIST_KEEP_S = 168.0, 2.5, 20.0, 72 * 3600
-CFG = WS = RUNS = LIVE = ROLES = VCS = HIST = MODE = ROUTE_LOCK = None
+CFG = WS = RUNS = LIVE = ROLES = AGENTS = VCS = HIST = MODE = ROUTE_LOCK = None
 MAX_ROUNDS, MAX_PARALLEL, ROUTES, DOMAINS = 2, 3, set(), set()
 
 
 def init(config_path=None):
     """Load team.toml and derive the module globals (tests call this with a temp project's config)."""
-    global CFG, WS, RUNS, LIVE, ROLES, MAX_ROUNDS, MAX_PARALLEL, ROUTES, DOMAINS, VCS, HIST, MODE, ROUTE_LOCK
+    global CFG, WS, RUNS, LIVE, ROLES, AGENTS, MAX_ROUNDS, MAX_PARALLEL, ROUTES, DOMAINS, VCS, HIST, MODE, ROUTE_LOCK
     CFG = teamcfg.load(config_path)
     WS, RUNS = CFG["root"], CFG["state"]
     LIVE = RUNS / "live.log"
@@ -38,6 +38,7 @@ def init(config_path=None):
     MAX_ROUNDS, MAX_PARALLEL = R["max_rounds"], R["max_parallel"]
     # role: (name, cli, model, effort)
     ROLES = {k: (r["name"], r["cli"], r["model"], r["effort"]) for k, r in CFG["roles"].items()}
+    AGENTS = CFG["agent_defs"]  # name -> {name, scope, instructions, optional model/effort pin}
     ROUTES, DOMAINS = set(R["pipeline"]), set(R["domains"])
     os.environ["TEAM_CONFIG"] = CFG["config_path"]
     VCS = vcsmod.make(CFG, shutil.which(CFG["vcs"]["kind"], path=_clean_path()))
@@ -106,8 +107,21 @@ def noun():
     return teamcfg.change_noun(CFG)
 
 
+def domain_guide(ordered):
+    """One line per domain: its name and the scope of the agent that implements it (the complex route's role if unset)."""
+    R = CFG["routing"]
+    default = next((r for k, r in R["pipeline"]["complex"] if k == "implement"), "")
+    lines = []
+    for d in ordered:
+        scope = AGENTS.get(R["domain"].get(d, {}).get("implement", default), {}).get("scope", "")
+        lines.append(f"- {d}: {scope}" if scope else f"- {d}")
+    return "\n".join(lines)
+
+
 def fmt(text):
     ordered = sorted(DOMAINS, key=CFG["routing"]["domains"].index)
+    if "{domain_guide}" in text:
+        text = text.replace("{domain_guide}", domain_guide(ordered))
     return (text.replace("{project}", CFG["project"]["name"]).replace("{change_noun}", noun())
             .replace("{domains}", "|".join(ordered)).replace("{docs}", ", ".join(CFG["project"]["docs"]))
             .replace("{state_dir}", CFG["project"]["state_dir"]))
@@ -118,12 +132,42 @@ def pipeline(route, domain):
     if route and route.startswith("custom:"):  # parallel side task: one named role implements, a reviewer checks
         return [("implement", route.split(":", 1)[1]), ("review", R["side_task_reviewer"])]
     stages = [tuple(x) for x in R["pipeline"][route if route in R["pipeline"] else "hard"]]
+    over = R["domain"].get(domain, {})  # [routing.domain.<name>]: agent per stage kind; unset = the route's role
+    stages = [(k, over.get(k, r)) for k, r in stages]
     if R["extra_review_role"] and (route in R["extra_review_routes"] or domain in R["review_extra_domains"]):
         stages.append(("review", R["extra_review_role"]))
-    owner = R["domain_roles"].get(domain)  # dedicated role plans and builds this domain; reviewers stay as routed
-    if owner:
-        stages = [(k, owner if k in ("plan", "implement") else r) for k, r in stages]
     return stages
+
+
+def stage_profile(route, domain, i):
+    """The [roles] entry (cli, model, effort) stage i starts on: its agent's own, else the route's role for that stage."""
+    agent = pipeline(route, domain)[i][1]
+    if agent in ROLES:
+        return agent
+    R = CFG["routing"]
+    if route and route.startswith("custom:"):
+        return R["side_task_reviewer"] if i else "mid"
+    base = R["pipeline"][route if route in R["pipeline"] else "hard"]
+    return base[i][1] if i < len(base) else R["extra_review_role"]
+
+
+def hist_entries(s):
+    """(kind, agent, profile) of each finished stage: from the launch records, else from the stem (tasks from before them)."""
+    by = {x["stem"]: x for x in s.get("launches", [])}
+    out = []
+    for h in s["history"]:
+        m = re.match(r"\d+-(\w+?)-(\w+)$", h)
+        old = m[2] if m else ""
+        out.append((m[1] if m else "", by[h]["agent"] if h in by else old, by[h]["profile"] if h in by else old))
+    return out
+
+
+def pin_fits(agent, profile):
+    """A pinned model only runs on a cli that serves it (profile swaps that change the cli are skipped). A floor
+    (model without `pin = true` under [heuristic]) is a rank, not a cli: it never blocks a swap."""
+    a = AGENTS.get(agent, {})
+    pin = a.get("model") if a.get("pinned") else None
+    return not pin or ROLES[profile][1] in {r["cli"] for r in CFG["roles"].values() if r["model"] == pin}
 
 
 def live(msg, echo=True):
@@ -142,7 +186,7 @@ def tag(text, key):
 
 def body(text):
     """Hand-off text without the protocol lines and clipped, to keep prompts small."""
-    text = re.sub(r"^\s*\**(STATUS|VERDICT|ROUTE|DOMAIN|TITLE):.*$", "", text, flags=re.M).strip()
+    text = re.sub(r"^\s*\**(STATUS|VERDICT|ROUTE|DOMAIN|TITLE|SKILLS|RISK|SIZE|SEVERITY|ESCALATE):.*$", "", text, flags=re.M).strip()
     return text if len(text) <= CLIP else text[:CLIP] + "\n[clipped]"
 
 
@@ -235,31 +279,76 @@ def write_snapshot(s):
     (d / "user_opened.txt").write_text(VCS.others_opened(s["change"]))
 
 
-def role_text(role):
-    text = teamcfg.template(CFG, f"roles/{role}.md")
-    return fmt(text) if text else f"You are the {ROLES[role][0]} of the {CFG['project']['name']} agent team."
+def role_text(agent):
+    text = AGENTS[agent]["instructions"]
+    return fmt(text) if text else f"You are the {ROLES[agent][0] if agent in ROLES else agent} of the {CFG['project']['name']} agent team."
 
 
-def build_prompt(s, kind, role):
+def agent_skills_table(agent, task_skills=()):
+    """'## Skills you have' table (name, path, when): paths only, the agent reads a file when it applies. Rows already
+    attached to the task (same name or same file) are dropped: the task skill is inlined."""
+    task_paths = {str((d / f"{n}.md").resolve()) for n, _ in task_skills for d in teamcfg._skill_dirs(CFG)}
+    task_names = {n for n, _ in task_skills}
+    rows = [k for k in AGENTS[agent].get("skills", []) if k["name"] not in task_names and k["path"] not in task_paths]
+    if not rows:
+        return ""
+    return "## Skills you have\nRead a skill file when its situation applies; do not read the rest.\n" + \
+        "\n".join(f"- {k['name']} | {k['path']} | {k['when']}" for k in rows)
+
+
+def stage_skills(s, kind):
+    """[(name, text)] of the task skills attached to this task for stage `kind` (ValueError when one cannot load)."""
+    if kind in ("route", "refill"):
+        return []
+    out = {}
+    for k in s.get("skills", []):
+        if k["stage"] in ("", kind) and k["name"] not in out:
+            out[k["name"]] = teamcfg.load_skill(CFG, k["name"])
+    return list(out.items())
+
+
+def attach_skills(s, refs, who, pl=None):
+    """Add (name, stage) refs to the task, deduped; warn about long texts and stages the pipeline does not run."""
+    have = {(k["name"], k["stage"]) for k in s.setdefault("skills", [])}
+    for name, stage in refs:
+        if (name, stage) in have:
+            continue
+        have.add((name, stage))
+        s["skills"].append({"name": name, "stage": stage})
+        if len(teamcfg.load_skill(CFG, name)) > CLIP:
+            live(f"[{s['id']}] warning: skill {name} is over {CLIP} chars")
+        if stage and pl is not None and stage not in {k for k, _ in pl}:
+            live(f"[{s['id']}] warning: skill {name}@{stage} ({who}) never runs: no {stage} stage in this pipeline")
+
+
+def build_prompt(s, kind, agent, skills=()):
     d = task_dir(s["id"])
     probes = env_status()
-    parts = [role_text(role), fmt(teamcfg.template(CFG, "roles/common.md")),
+    parts = [role_text(agent), agent_skills_table(agent, skills) if kind not in ("route", "refill") else "",
+             fmt(teamcfg.template(CFG, "roles/common.md")),
              fmt(teamcfg.template(CFG, f"vcs/{CFG['vcs']['kind']}.md")),
              f"Task {s['id']} | {noun()} {s['change']} | folder {d} | {s.get('route')}/{s.get('domain')}"
              + (f" | {probes}" if probes else ""),
              "## Request\n" + s["request"]]
     parts = [p for p in parts if p]
+    parts += [f"## Skill: {n}\n{x}" for n, x in dict(skills).items()]
     for label, key in (("Spec", "spec"), ("Plan", "plan"), ("Report", "report")):
         if s.get(key) and kind != "route":
             parts.append(f"## {label}\n" + body(Path(s[key]).read_text()))
     feedback = s["plan_reviews"] if kind in ("plan", "plan_review") else s["reviews"]
     if kind != "route":
         parts += [f"## Earlier findings ({Path(r).stem})\n" + body(Path(r).read_text()) for r in feedback]
+    if kind != "route" and s.get("diagnose") == kind:
+        parts.append("## Diagnosis required\nA reviewer rated the last failure critical or recommended escalation. Before "
+                     "changing anything, state the root cause and why the earlier attempt missed it, then fix that.")
     if kind != "implement" and CFG["prompts"]["readonly_note"]:
         parts.append(CFG["prompts"]["readonly_note"])
     if s["notes"]:
         parts.append("## User notes\n" + "\n".join(f"- {n}" for n in s["notes"]))
-    parts.append("## Job\n" + fmt(teamcfg.template(CFG, f"jobs/{kind}.md")))
+    job = fmt(teamcfg.template(CFG, f"jobs/{kind}.md"))
+    if kind == "route":
+        job = job.replace("{skills}", "\n".join(f"- {n}: {x}" for n, x in teamcfg.list_skills(CFG).items()) or "(none)")
+    parts.append("## Job\n" + job)
     return "\n\n".join(parts)
 
 
@@ -473,9 +562,22 @@ def claude_low():
             _usage["scoped_high"] = bool(sc) and u.get(sc["label"], 0) >= sc["threshold"]
             _usage["low"] = any(u.get(k, 0) >= v for k, v in U["limits"].items())
             _usage["mode"] = route_mode(u)
+            _usage["ok_t"], _usage["fail"] = time.time(), False
         except Exception:
-            pass  # unknown usage: keep the last answer
+            _usage["fail"] = True  # unknown usage: keep the last answer for balancing, but the heuristic ignores it
     return _usage["low"]
+
+
+def usage_input():
+    """(state, why) for the heuristic's `usage` input: low | claude | codex | mixed from a fresh successful read of the
+    usage data, else (None, why): stale or missing data never matches a rule."""
+    if not CFG["routing"]["usage"]["enabled"]:
+        return None, "usage balancing is disabled"
+    if _usage["fail"]:
+        return None, "the last usage read failed"
+    if time.time() - _usage["ok_t"] > 120:
+        return None, "usage data is older than 120s"
+    return ("low" if _usage["low"] else _usage["mode"]), ""
 
 
 def burst_active():
@@ -487,17 +589,38 @@ def burst_active():
         return False
 
 
-def run_agent(s, kind, role):
-    role, burst = _select_agent_role(s, kind, role)
+def ladder(s, kind):
+    """The task's heuristic snapshot ({tiers, rules}), taken from the config at its first decision so that a later
+    config edit cannot change a task in flight. None: no table (and the refill pseudo-task never uses one)."""
+    if kind != "refill" and "heuristic" not in s and CFG["heuristic"]:
+        s["heuristic"] = json.loads(json.dumps(CFG["heuristic"]))
+    return s.get("heuristic") if kind != "refill" else None
+
+
+def run_agent(s, kind, agent, profile=None):
+    """Run one stage; returns (out, text, agent, profile) with the agent and [roles] profile it finally used."""
+    h = ladder(s, kind)
+    ctx = None
+    if h:
+        agent, role, burst, ctx = _select_tiered(s, kind, agent, profile or agent, h)
+    else:
+        agent, role, burst = _select_agent_role(s, kind, agent, profile or agent)
     capacity = CFG["routing"]["capacity_fallback"]  # a model reporting 503 / "at capacity" is retried on another role
     tried = [role]
     while True:
-        out, text = _run_agent_once(s, kind, role, selection=(role, burst))
+        out, text = _run_agent_once(s, kind, agent, role, burst, ctx)
         if out or s["status"] != "failed" or role not in capacity or not capacity_error(s["reason"].rsplit("see ", 1)[-1]):
-            return out, text
+            return out, text, agent, role
         if capacity[role] in tried:  # a fallback cycle: every role in it is unavailable
             s["reason"] += f" (capacity: {' -> '.join(tried)} all unavailable)"
-            return out, text
+            return out, text, agent, role
+        nxt = _move(ctx, s, agent, role, capacity[role], clamped=True)
+        if not nxt:
+            if ctx and ctx.get("h"):  # the heuristic never retries below the tier
+                s["status"], s["reason"] = "blocked", s["reason"] + f" (capacity: no profile at or above tier {ctx['h']['tiers'][ctx['tier']]['name']} left to retry)"
+            else:
+                s["reason"] += f" (capacity: {agent} is pinned to a model that {capacity[role]} cannot run)"
+            return out, text, agent, role
         live(f"[{s['id']}] {role} model unavailable (capacity/503): retrying as {capacity[role]}")
         s["status"], s["reason"], role = "running", "", capacity[role]
         tried.append(role)
@@ -524,7 +647,53 @@ def capacity_error(raw):
     return any(k in blob for k in ("at capacity", "503", "Service Unavailable", "overloaded"))
 
 
-def _select_agent_role(s, kind, role):
+def _move(ctx, s, agent, role, new, clamped=False):
+    """`new` when a swap role -> new is allowed, else None. Without a heuristic context only a pinned model can refuse.
+    Under a heuristic the swap may not drop below the tier: a replaced swap (usage balancing) only picks the cli of the
+    current rank, a clamped one (gate, capacity) needs a profile on a rank >= the tier. A stage at its own profile's
+    rank (no rule, floor or step above it) swaps as without a heuristic, but not below the rules' tier."""
+    if not ctx or not ctx.get("h"):
+        return new if pin_fits(agent, new) else None
+    h, tier = ctx["h"], ctx["h"]["tiers"][ctx["tier"]]["name"]
+    if ctx["rank"] <= ctx["own"]:
+        r = teamcfg.own_rank(h, new, ROLES[new][2], ROLES[new][3])
+        if r < ctx["tier"] or not pin_fits(agent, new):
+            live(f"[{s['id']}] heuristic: {role} -> {new} skipped, it is below tier {tier}")
+            return None
+        ctx["rank"] = ctx["own"] = r
+        return new
+    if clamped:
+        r = teamcfg.role_rank(h, new)
+        if r is None or r < ctx["tier"]:
+            live(f"[{s['id']}] heuristic: {role} -> {new} skipped, it is below tier {tier}")
+            return None
+        ctx["rank"] = max(ctx["rank"], r)
+    elif not h["tiers"][ctx["rank"]][ROLES[new][1]]:
+        live(f"[{s['id']}] heuristic: {role} -> {new} skipped, tier {h['tiers'][ctx['rank']]['name']} has no {ROLES[new][1]} profile")
+        return None
+    return new
+
+
+def _reassign(s, kind, agent, role):
+    """Per-task role_override entries: (agent, role, forced); forced = an override applied."""
+    forced = False
+    try:  # per-task overrides run after automatic role selection
+        ov = json.loads((RUNS / "role_override.json").read_text()).get(s["id"], {})
+        if kind in ("plan", "plan_review", "review") and ov.get(kind) in ROLES:
+            live(f"[{s['id']}] Override: {role} -> {ov[kind]}")
+            agent = role = ov[kind]
+            forced = True
+        if kind == "implement" and ov.get("implement") in ROLES and s["review_rounds"] >= ov.get("after_failed_reviews", 1):
+            live(f"[{s['id']}] Override after failed review: {role} -> {ov['implement']}")
+            agent = role = ov["implement"]
+            forced = True
+    except (OSError, ValueError):
+        pass
+    return agent, role, forced
+
+
+def _swap_roles(s, kind, agent, role, ctx=None):
+    """(role, burst) after usage balancing. ctx: heuristic context (None = legacy pin_fits rules)."""
     R = CFG["routing"]
     U = R["usage"]
     # Cheap roles implement, expensive ones review: [routing.usage].cheap_first roles start on their fallback unless a
@@ -537,59 +706,133 @@ def _select_agent_role(s, kind, role):
     burst = burst_active()
     if surplus and not claude_low():  # swap Codex roles to Claude to conserve Codex
         swap = dict(U["surplus_swap"], **(U["burst_swap"] if burst else {}))
-        if role in swap:
-            live(f"[{s['id']}] Claude surplus: {role} -> {swap[role]}")
-            role = swap[role]
-    if codex_first:
-        live(f"[{s['id']}] Codex first: {role} -> {U['claude_fallback'][role]} (Codex)")
-        role = U["claude_fallback"][role]
+        new = _move(ctx, s, agent, role, swap[role]) if role in swap else None
+        if new:
+            live(f"[{s['id']}] Claude surplus: {role} -> {new}")
+            role = new
+    new = _move(ctx, s, agent, role, U["claude_fallback"][role]) if codex_first else None
+    if new:
+        live(f"[{s['id']}] Codex first: {role} -> {new} (Codex)")
+        role = new
     gate = U["escalation_gate"]  # scarce top role only after cheaper rounds failed
     if gate and role == gate["role"] and not burst and not s.get("failed") and max(s["plan_rounds"], s["review_rounds"]) < gate.get("after_rounds", 2):
-        if kind == "review" and s["history"] and s["history"][-1].endswith(f"-review-{gate['first']}"):
+        if kind == "review" and s["history"] and hist_entries(s)[-1][::2] == ("review", gate["first"]):
             # second review right after a passing first review: an independent opinion from another provider
-            live(f"[{s['id']}] Second review: {role} -> {gate['second_review']} ({gate['first']} already passed it)")
-            role = gate["second_review"]
+            swapped = gate["second_review"]
+            msg = f"Second review: {role} -> {swapped} ({gate['first']} already passed it)"
         else:
-            live(f"[{s['id']}] {gate['first']} first: {role} -> {gate['first']}")
-            role = gate["first"]
+            swapped, msg = gate["first"], f"{gate['first']} first: {role} -> {gate['first']}"
+        if _move(ctx, s, agent, role, swapped, clamped=True):
+            live(f"[{s['id']}] {msg}")
+            role = swapped
     scoped = U["scoped_limit"]
     if ROLES[role][1] == "claude" and role in U["claude_fallback"] and (
             cheap_first or codex_first or claude_low() or (scoped and role == scoped["role"] and _usage.get("scoped_high"))):
-        live(f"[{s['id']}] {'Codex first' if cheap_first or codex_first else 'Claude usage low'}: {role} -> {U['claude_fallback'][role]} (Codex)")
-        role = U["claude_fallback"][role]
-    try:  # per-task overrides run after automatic role selection
-        ov = json.loads((RUNS / "role_override.json").read_text()).get(s["id"], {})
-        if kind in ("plan", "plan_review", "review") and ov.get(kind) in ROLES:
-            live(f"[{s['id']}] Override: {role} -> {ov[kind]}")
-            role = ov[kind]
-        if kind == "implement" and ov.get("implement") in ROLES and s["review_rounds"] >= ov.get("after_failed_reviews", 1):
-            live(f"[{s['id']}] Override after failed review: {role} -> {ov['implement']}")
-            role = ov["implement"]
-    except (OSError, ValueError):
-        pass
-    af = R["after_impl_fails"]  # repeated failed implementations go to a stronger role
-    if kind == "implement" and af and s.get("impl_fails", 0) >= af["fails"] and role != af["role"]:
-        live(f"[{s['id']}] {s['impl_fails']} failed implementations: {role} -> {af['role']}")
-        role = af["role"]
+        new = _move(ctx, s, agent, role, U["claude_fallback"][role])
+        if new:
+            live(f"[{s['id']}] {'Codex first' if cheap_first or codex_first else 'Claude usage low'}: {role} -> {new} (Codex)")
+            role = new
     return role, burst
 
 
-def _run_agent_once(s, kind, role, *, selection=None):
-    role, burst = selection if selection is not None else _select_agent_role(s, kind, role)
+def _select_agent_role(s, kind, agent, role):
+    """(agent, profile, burst). A role_override or takeover `to` reassigns agent and profile; usage swaps only the profile."""
+    role, burst = _swap_roles(s, kind, agent, role)
+    agent, role, _ = _reassign(s, kind, agent, role)
+    return agent, role, burst
+
+
+def _select_tiered(s, kind, agent, profile, h):
+    """(agent, profile, burst, ctx) under [heuristic]: the tier for this stage comes from the rule table, usage
+    balancing only picks the cli (and clamped swaps stay at or above the tier). A pinned agent or a role_override keeps
+    its exact profile, model and effort. ctx carries the ladder and the decision record to _run_agent_once."""
+    agent, profile, forced = _reassign(s, kind, agent, profile)
+    a = AGENTS[agent]
+    if forced or a["pinned"]:
+        why = "override" if forced else "pin"
+        role, burst = (profile, burst_active()) if forced else _swap_roles(s, kind, agent, profile)
+        return agent, role, burst, {"h": None, "record": {"kind": kind, "decided_by": why, "rules": []}}
+    claude_low()  # refreshes _usage
+    state, why = usage_input()
+    known = kind != "route"  # routing decides risk and size: no risk or size rule matches the route stage itself
+    inp = {"route": s.get("route"), "domain": s.get("domain"), "risk": s.get("risk", "high") if known else None,
+           "size": s.get("size", "large") if known else None, "stage": kind, "failures": s.get("impl_fails", 0) + s["plan_rounds"], "usage": state}
+    res = teamcfg.resolve(h, inp, a.get("model"), a.get("effort"))
+    notes = []
+    if state is None and any("usage" in r["when"] for r in h["rules"]):
+        notes.append(f"usage ignored: {why}")
+    floor = max([e["rank"] for e in s.get("stepped", []) if e["kind"] == kind and e["rank"] < len(h["tiers"])], default=None)
+    if floor is not None and floor > res["rank"]:  # an escalation step (see escalate) raises the tier
+        res = {**res, "rank": floor, "tier": h["tiers"][floor]["name"], "decided_by": "step-up"}
+        notes.append(f"step-up: {kind} retried at tier {res['tier']}")
+    last = (s.get("launches") or [{}])[-1]
+    prev = last.get("heuristic") or {}
+    if prev.get("tier_rank") is not None and last.get("stem") not in s["history"] and prev.get("kind") == kind \
+            and last.get("agent") == agent and prev["tier_rank"] < len(h["tiers"]):
+        res = {**res, "rank": prev["tier_rank"], "tier": h["tiers"][prev["tier_rank"]]["name"], "decided_by": "resume"}
+        notes.append("resume: reused the tier of the unfinished launch")
+    # the stage's own [roles] profile is a floor: at its rank (see teamcfg.own_rank) it runs that profile itself, so only a
+    # rule, floor or step above it changes the model; "tier" keeps the rules' minimum for swaps
+    tier, own = res["rank"], teamcfg.own_rank(h, profile, ROLES[profile][2], ROLES[profile][3])
+    if own > res["rank"]:
+        res = {**res, "rank": own, "tier": h["tiers"][own]["name"], "decided_by": "profile"}
+    ctx = {"h": h, "tier": tier, "rank": res["rank"], "own": own, "effort_min": res["effort_min"],
+           "record": {"kind": kind, "inputs": inp, "tier": res["tier"], "tier_rank": res["rank"], "rules": res["rules"],
+                      "decided_by": res["decided_by"], "notes": notes}}
+    role, burst = _swap_roles(s, kind, agent, profile, ctx)
+    return agent, role, burst, ctx
+
+
+def _assignment(ctx, role, burst):
+    """(cli, model, effort, ladder role) the tiered stage runs on, and the record of it in ctx."""
+    no_burst = CFG["routing"]["usage"]["no_burst_effort"]
+    cap = no_burst.get(role) if not burst else None  # high effort only during a user-requested burst
+    if ctx["rank"] <= ctx["own"]:  # not raised above the stage's own profile: it runs unchanged
+        _, cli, model, effort = ROLES[role]
+        effort = teamcfg.bound_effort(cli, effort, cap, ctx["effort_min"])
+        prof = role
+    else:
+        cli, prof, model, effort = teamcfg.assign(ctx["h"], ctx["rank"], ROLES[role][1], cap, ctx["effort_min"])
+    ctx["record"].update(rank=ctx["rank"], tier_final=ctx["h"]["tiers"][ctx["rank"]]["name"], assigned=prof,
+                         cli=cli, model=model, effort=effort)
+    return cli, model, effort, prof
+
+
+def _run_agent_once(s, kind, agent, role, burst, ctx=None):
     name, cli, model, effort = ROLES[role]
-    if not burst and role in CFG["routing"]["usage"]["no_burst_effort"]:
-        effort = CFG["routing"]["usage"]["no_burst_effort"][role]  # high effort only during a user-requested burst
+    if ctx and ctx.get("h"):  # the tiered profile decides cli, model and effort
+        cli, model, effort, _ = _assignment(ctx, role, burst)
+    else:
+        if not burst and role in CFG["routing"]["usage"]["no_burst_effort"]:
+            effort = CFG["routing"]["usage"]["no_burst_effort"][role]  # high effort only during a user-requested burst
+        pin = AGENTS[agent]
+        if pin["pinned"]:
+            model, effort = pin.get("model", model), pin.get("effort", effort)  # the agent's pin is exact
+        if ctx:
+            ctx["record"].update(cli=cli, model=model, effort=effort, assigned=role)
+    name = ROLES[agent][0] if agent in ROLES else agent
     d = task_dir(s["id"])
+    try:  # before the launch record: a missing skill file fails the stage without a launch
+        skills = stage_skills(s, kind)
+    except ValueError as e:
+        s["status"], s["reason"] = "failed", f"{e}: restore skills/<name>.md or remove it from {d / 'state.json'} `skills`"
+        return None, None
     s["n"] += 1
-    stem = f"{s['n']:02d}-{kind}-{role}"
+    stem = f"{s['n']:02d}-{kind}-{agent}"
+    launch = {"stem": stem, "agent": agent, "profile": role, "cli": cli, "model": model, "effort": effort}
+    if ctx:
+        launch["heuristic"] = dict(ctx["record"])  # inputs, rules, tier and assignment: audited, and a resume reuses its tier
+    s.setdefault("launches", []).append(launch)  # saved before the launch: readers see what runs now
+    if kind != "refill":  # the refill log is merged under its own lock
+        save(s)
     out, raw = d / f"{stem}.md", d / "logs" / f"{stem}.jsonl"
     raw.parent.mkdir(exist_ok=True)
     if kind not in ("route", "refill"):
         write_snapshot(s)
-    text = build_prompt(s, kind, role)
+    text = build_prompt(s, kind, agent, skills)
     (d / "logs" / f"{stem}.prompt.md").write_text(text)
     ensure_guards()
-    env = dict(os.environ, TEAM_TASK=s["id"], TEAM_CHANGE=str(s["change"]), TEAM_ROLE=role,
+    env = dict(os.environ, TEAM_TASK=s["id"], TEAM_CHANGE=str(s["change"]), TEAM_ROLE=agent,
                TEAM_CONFIG=CFG["config_path"], PATH=f"{_guard_dir()}{os.pathsep}{_clean_path()}")
     for tool in CFG["vcs"]["guard_names"]:  # used by the edit hook; the guard falls back to a PATH search
         real = shutil.which(tool, path=_clean_path())
@@ -599,6 +842,11 @@ def _run_agent_once(s, kind, role, *, selection=None):
             env.pop(f"TEAM_REAL_{tool.upper()}", None)
     cmd = teamcfg.command(agent_cmd(cli, model, effort, kind != "implement", out), path=env["PATH"])
 
+    if ctx:
+        r = ctx["record"]
+        live(f"[{s['id']}] heuristic {kind}: {r.get('tier_final') or r.get('tier') or r['decided_by']} via {r['decided_by']}"
+             f" (rules: {', '.join(r['rules']) or 'none'}) -> {r['assigned']} {cli} {model} {effort}"
+             + "".join(f"; {n}" for n in r.get("notes", [])))
     live(f"[{s['id']}] {name} ({model}, {effort}): {kind}")
     final = timer = None
     untracked = []  # Codex edits that could not join the task's change
@@ -672,14 +920,17 @@ def track_codex_edits(s, ev):
 
 
 def route_task(s):
-    out, text = run_agent(s, "route", "producer")
+    out, text, _, _ = run_agent(s, "route", "producer")
     if not out:
         return
     s["spec"] = out
     route, _ = tag(text, "ROUTE")
     domain, _ = tag(text, "DOMAIN")
     _, title = tag(text, "TITLE")
+    set_risk_size(s, tag(text, "RISK")[0], tag(text, "SIZE")[0])
     s["title"] = title or s["request"].splitlines()[0][:60]
+    if route in ROUTES and domain in DOMAINS:
+        suggest_skills(s, text, route, domain)
     VCS.set_description(s["change"], f"[team {s['id']}] {s['title']}")
     if route == "ask":
         s["status"], s["reason"] = "blocked", f"Producer needs a decision; see `team review {s['id']}`, then `team redo`."
@@ -690,45 +941,139 @@ def route_task(s):
         live(f"[{s['id']}] routed {route}/{domain}: {s['title']}")
 
 
+def set_risk_size(s, risk, size):
+    """Record the task's risk and size for the heuristic. A missing or invalid value keeps an earlier one, else
+    defaults to high/large (the strongest assumption), with a warning when a [heuristic] table would use it."""
+    for key, val, ok, default in (("risk", risk, teamcfg.RISKS, "high"), ("size", size, teamcfg.SIZES, "large")):
+        if val in ok:
+            s[key] = val
+        elif key not in s:
+            s[key] = default
+            if CFG["heuristic"]:
+                live(f"[{s['id']}] warning: no valid {key.upper()} ({val or 'missing'}), using {default}")
+
+
+def suggest_skills(s, text, route, domain):
+    """The Producer's `SKILLS:` line: unknown names, bad stages and repeats are dropped with a warning."""
+    refs = []
+    for tok in teamcfg.skill_tokens(" ".join(x for x in tag(text, "SKILLS") if x)):
+        try:
+            name, stage = teamcfg.parse_skill_ref(tok)
+            teamcfg.load_skill(CFG, name)
+        except ValueError as e:
+            live(f"[{s['id']}] warning: Producer skill {tok} dropped: {e}")
+            continue
+        refs.append((name, stage))
+    attach_skills(s, refs, "Producer")
+    stages = {k for k, _ in pipeline(route, domain)}  # the user's `--skill name@stage` faces the routed pipeline too
+    for k in s.get("skills", []):
+        if k["stage"] and k["stage"] not in stages:
+            live(f"[{s['id']}] warning: skill {k['name']}@{k['stage']} never runs: no {k['stage']} stage in this pipeline")
+
+
 def step(s, stages):
-    kind, role = stages[s["stage"]]
-    tk = CFG["routing"]["takeover"].get(role)  # [routing.takeover.<role>]: to, after_reviews, after_attempt
-    if kind == "implement" and tk and (
-            s["review_rounds"] >= tk.get("after_reviews", 1)
-            or (tk.get("after_attempt") and any(h.endswith(f"-implement-{role}") for h in s["history"]))):
-        role = tk["to"]
-    out, text = run_agent(s, kind, role)
+    kind, agent = stages[s["stage"]]
+    profile = stage_profile(s["route"], s["domain"], s["stage"])
+    tk = CFG["routing"]["takeover"].get(agent)  # [routing.takeover.<role>]: optional explicit `to` agent
+    if kind == "implement" and tk and tk.get("to") and takeover_due(s, agent, tk):
+        agent = profile = tk["to"]
+    out, text, agent, role = run_agent(s, kind, agent, profile)
     if not out:
         return
+    who = ROLES[agent][0] if agent in ROLES else agent
     if kind in ("plan", "implement"):
         s["plan" if kind == "plan" else "report"] = out
         status, reason = tag(text, "STATUS")
         if status == "done":
             s["stage"] += 1
         elif status in ("gate", "blocked"):
-            s["status"], s["reason"] = status, f"{ROLES[role][0]}: {reason}"
+            s["status"], s["reason"] = status, f"{who}: {reason}"
         else:
-            s["status"], s["reason"] = "failed", f"{ROLES[role][0]} gave no STATUS line"
+            s["status"], s["reason"] = "failed", f"{who} gave no STATUS line"
         return
     verdict, _ = tag(text, "VERDICT")
+    sev, _ = tag(text, "SEVERITY")
+    esc, esc_why = tag(text, "ESCALATE")
+    esc = esc == "yes"
     feedback = "plan_reviews" if kind == "plan_review" else "reviews"
-    if verdict == "pass":
+    rounds, target = ("plan_rounds", "plan") if kind == "plan_review" else ("review_rounds", "implement")
+    if verdict == "pass" and not esc:
+        if s.get("diagnose") == target:
+            s.pop("diagnose")
         s["stage"] += 1
         return
-    if verdict != "fail":
-        s["status"], s["reason"] = "failed", f"{ROLES[role][0]} gave no VERDICT line"
+    if verdict not in ("pass", "fail"):
+        s["status"], s["reason"] = "failed", f"{who} gave no VERDICT line"
         return
-    rounds, target = ("plan_rounds", "plan") if kind == "plan_review" else ("review_rounds", "implement")
+    if sev not in SEVERITIES:  # a failing review without a valid severity counts as major
+        sev = "major"
     s[feedback] = [out]  # only the latest findings travel forward
     s[rounds] += 1
     if kind != "plan_review":
         s["impl_fails"] = s.get("impl_fails", 0) + 1  # cumulative, survives escalation retries
-    if s[rounds] > MAX_ROUNDS:
+    ti = next(i for i, (k, _) in enumerate(stages) if k == target)
+    severe = esc or sev in ("major", "critical")  # minor: no step
+    reasons = ([f"severity {sev}"] if sev != "minor" else []) + ([f"recommended: {esc_why}"] if esc else [])
+    if target == "implement":
+        reasons += count_triggers(s, stages[ti][1])
+    refused = escalate(s, stages, ti, reasons) if reasons else None
+    if esc or sev == "critical":
+        s["diagnose"] = target
+    if not (severe and refused):
+        s.pop("capped", None)  # only a refused severe step marks the cap for `team approve`
+    if severe and refused:  # a major failure that cannot step up goes to the user
         s["failed"] = True
-        s["status"], s["reason"] = "escalated", f"{target} failed review {s[rounds]} times; see {out}"
-    else:
-        s["stage"] = next(i for i, (k, _) in enumerate(stages) if k == target)
-        live(f"[{s['id']}] review failed, back to {target} (round {s[rounds]})")
+        s["status"], s["reason"] = "escalated", f"{target} failed review ({sev}{', escalation recommended' if esc else ''}): {refused}; see {out}"
+        return
+    if not severe:
+        n = s.setdefault("minor_rounds", {})
+        n[target] = n.get(target, 0) + 1
+        if n[target] > MAX_ROUNDS:
+            s["failed"] = True
+            s["status"], s["reason"] = "escalated", f"{target} failed review {n[target]} times (minor); see {out}"
+            return
+    s["stage"] = ti
+    live(f"[{s['id']}] review failed ({sev}), back to {target} (round {s[rounds]})")
+
+
+SEVERITIES = ("minor", "major", "critical")
+
+
+def takeover_due(s, agent, tk):
+    """[routing.takeover.<role>]: the failed-review or first-attempt condition."""
+    return s["review_rounds"] >= tk.get("after_reviews", 1) or bool(
+        tk.get("after_attempt") and ("implement", agent) in [e[:2] for e in hist_entries(s)])
+
+
+def count_triggers(s, agent):
+    """Reasons from the failure-count rules for the implement stage that just failed: a [routing.takeover.<role>]
+    without `to` (once per run of the task) and [routing.after_impl_fails] (exactly at `fails`)."""
+    R, out = CFG["routing"], []
+    tk = R["takeover"].get(agent)
+    if tk and not tk.get("to") and takeover_due(s, agent, tk) \
+            and not any("takeover" in e["rules"] for e in s.get("stepped", []) if e["kind"] == "implement"):
+        out.append("takeover")
+    af = R["after_impl_fails"]
+    if af and s.get("impl_fails", 0) == af["fails"]:
+        out.append("after_impl_fails")
+    return out
+
+
+def escalate(s, stages, ti, reasons):
+    """Step the retry of stage ti up one tier (one entry per failure, however many rules fired). Returns why it
+    cannot (no ladder, a pin or role_override, already at the strongest tier), else None."""
+    kind, agent = stages[ti]
+    h = s.get("heuristic")
+    last = next((x for x in reversed(s.get("launches", [])) if (x.get("heuristic") or {}).get("kind") == kind), None)
+    rank = ((last or {}).get("heuristic") or {}).get("rank")
+    if not h or rank is None:
+        return "no tier ladder applies (no [heuristic], a pinned agent or a role_override)"
+    if rank >= len(h["tiers"]) - 1:
+        s["capped"] = kind  # `team approve` retries here at the cap
+        return f"already at the strongest tier ({h['tiers'][rank]['name']})"
+    s.setdefault("stepped", []).append({"kind": kind, "agent": agent, "rank": rank + 1, "rules": reasons})
+    live(f"[{s['id']}] escalation ({', '.join(reasons)}): {kind} retries at tier {h['tiers'][rank + 1]['name']}")
+    return None
 
 
 def resource_ok(name):
@@ -1047,7 +1392,7 @@ def _refill():
     allowance, sig = refill_allowance(r), plan_signature()  # the plan as the Producer reads it
     new = []
     try:
-        out, text = run_agent(r, "refill", "producer")
+        out, text, _, _ = run_agent(r, "refill", "producer")
     except Exception as e:  # e.g. the CLI is missing: a running state left behind would hide the failure
         out, text = None, None
         r["status"], r["reason"] = "failed", f"Producer could not run: {e}"
@@ -1351,12 +1696,20 @@ def stage_label(s):
 
 
 def cmd_new(a):
-    s = create_task(a.request, a.res, a.role)
+    refs = []
+    try:
+        for ref in a.skill:
+            refs += teamcfg.parse_skill_refs(ref)
+        for name, _ in refs:
+            teamcfg.load_skill(CFG, name)
+    except ValueError as e:
+        sys.exit(f"--skill: {e}")
+    s = create_task(a.request, a.res, a.role, skills=refs, risk=getattr(a, "risk", None), size=getattr(a, "size", None))
     if not a.no_run:
         advance(s)
 
 
-def create_task(request, res_arg="", role=None, queued=False):
+def create_task(request, res_arg="", role=None, queued=False, skills=(), risk=None, size=None):
     """A new task folder, change and state; queued ones are started by the queue runner."""
     RUNS.mkdir(parents=True, exist_ok=True)
     n = max([int(p.name[1:]) for p in RUNS.glob("t[0-9]*") if p.name[1:].isdigit()] + [0]) + 1
@@ -1382,8 +1735,15 @@ def create_task(request, res_arg="", role=None, queued=False):
     if role:  # parallel side task: skip routing, the named role implements
         s.update(route=f"custom:{role}", stage=0, title=request.splitlines()[0][:60],
                  domain=CFG["routing"]["side_task_domains"].get(role, CFG["routing"]["domains"][0]))
+    if risk:
+        s["risk"] = risk
+    if size:
+        s["size"] = size
+    if role:  # a side task skips routing: its risk/size are fixed now so a resume sees the same inputs
+        set_risk_size(s, risk, size)
     if queued:
         s.update(queued=True, reason="queued")
+    attach_skills(s, skills, "you", pipeline(s["route"], s["domain"]) if role else None)
     save(s)
     live(f"[{tid}] created, {noun()} {s['change']}")
     return s
@@ -1393,6 +1753,17 @@ def cmd_run(a):
     advance(load(a.id), from_queue=a.queued)
 
 
+def reset_escalation(s):
+    """Clear step-ups, the diagnosis and minor rounds. A task approved after hitting the strongest tier retries there
+    (its next major failure goes to the user); `team redo` starts over."""
+    capped = s.pop("capped", None)
+    for k in ("stepped", "diagnose", "minor_rounds"):
+        s.pop(k, None)
+    h = s.get("heuristic")
+    if capped and h:
+        s["stepped"] = [{"kind": capped, "agent": "", "rank": len(h["tiers"]) - 1, "rules": ["approved at the cap"]}]
+
+
 def cmd_approve(a):
     s = load(a.id)
     if s["status"] not in ("gate", "blocked", "escalated", "failed"):
@@ -1400,6 +1771,7 @@ def cmd_approve(a):
     s["notes"].append(f"Approved ({s['reason']})" + (f": {a.note}" if a.note else ""))
     if s["status"] == "escalated":
         s["plan_rounds"] = s["review_rounds"] = 0
+        reset_escalation(s)
         stages = pipeline(s["route"], s["domain"])
         kind = stages[s["stage"]][0] if 0 <= s["stage"] < len(stages) else None
         if kind in ("plan", "plan_review", "review"):  # retry the work that failed review, not the review
@@ -1425,6 +1797,8 @@ def cmd_redo(a):
     s = load(a.id)
     s["notes"].append(a.note)
     s["plan_rounds"] = s["review_rounds"] = 0
+    s.pop("capped", None)  # redo starts below the cap, unlike approve
+    reset_escalation(s)
     s["stage"] = -1 if not s["route"] else next(
         i for i, (k, _) in enumerate(pipeline(s["route"], s["domain"])) if k == "implement")
     advance(s)
@@ -1480,6 +1854,11 @@ def cmd_status(a):
             print(f"      {s['reason']}")
 
 
+def warn_deprecated():
+    if CFG.get("deprecated_domain_roles"):
+        print("team: [routing.domain_roles] is deprecated; use [routing.domain.<name>] plan/implement.", file=sys.stderr)
+
+
 def main():
     if os.name != "nt":  # agents run in their own session: a TERM/HUP must unwind like Ctrl+C so they are reaped
         for sig in (signal.SIGTERM, signal.SIGHUP):
@@ -1488,13 +1867,18 @@ def main():
     pre.add_argument("--config", help="team.toml path (default: $TEAM_CONFIG, else the nearest team.toml upwards)")
     g, rest = pre.parse_known_args()
     init(g.config)
+    warn_deprecated()
     ap = argparse.ArgumentParser(prog="team", description=__doc__, parents=[pre])
     sub = ap.add_subparsers(required=True)
     p = sub.add_parser("new", help="create a task and run it")
     p.add_argument("request")
     p.add_argument("--role", choices=CFG["routing"]["side_task_roles"] or None,
                    help="parallel side task: skip routing, this role implements, the side-task reviewer reviews")
+    p.add_argument("--risk", choices=teamcfg.RISKS, help="heuristic input for a side task (default: high)")
+    p.add_argument("--size", choices=teamcfg.SIZES, help="heuristic input for a side task (default: large)")
     p.add_argument("--res", default="", help="locks used, comma list of [locks].names or none (default: [locks].default)")
+    p.add_argument("--skill", action="append", default=[], metavar="NAME[@STAGE]",
+                   help="task skill (skills/<name>.md) added to this task's prompt, for one stage or all; repeatable")
     p.add_argument("--no-run", action="store_true", help="create the task only; start it later with `team run <id>`")
     p.set_defaults(func=cmd_new)
     p = sub.add_parser("run", help="resume a task")

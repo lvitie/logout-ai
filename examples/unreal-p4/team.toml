@@ -1,5 +1,7 @@
 # Example: the original Unreal + Perforce team this system was extracted from. Copy to the project root as
 # team.toml, copy roles/ to <templates_dir>/roles/ and adjust. Models and rules are the source project's, not defaults.
+# The default template already ships the game-dev agents, domains, skills, heuristic rules and editor/gpu/build locks
+# (docs/AGENT_TEAM.md, "Game-dev defaults"); this file is a full custom team that replaces them.
 [project]
 name = "inferno"
 root = "."
@@ -118,24 +120,24 @@ extra_review_role = "director"
 side_task_reviewer = "architect"
 side_task_roles = ["leveldesigner", "artdirector", "artist", "mid", "senior", "architect_claude"]
 capacity_fallback = { architect = "architect2", architect2 = "director", director2 = "director", mid = "senior", senior2 = "senior" }
-[routing.domain_roles]
-level = "leveldesigner"
+[routing.domain.level]
+plan = "leveldesigner"
+implement = "leveldesigner"
 [routing.side_task_domains]
 artist = "mesh"
 [routing.pipeline]
 simple = [["implement", "mid"], ["review", "architect"]]
 complex = [["plan", "architect"], ["plan_review", "director"], ["implement", "mid"], ["review", "architect"]]
 hard = [["plan", "director"], ["plan_review", "architect"], ["implement", "senior"], ["review", "architect"]]
-[routing.takeover.mid]
-to = "senior"
-after_reviews = 1
-after_attempt = true
-[routing.takeover.leveldesigner]
-to = "senior"
+[routing.takeover.leveldesigner]   # the same agent steps up one tier after 2 failed reviews
 after_reviews = 2
-[routing.after_impl_fails]
+[routing.after_impl_fails]         # one more step at the 3rd failed implementation
 fails = 3
-role = "senior_astra"
+# Escalation ladder: a major/critical review result (or ESCALATE: yes) retries the same agent one tier up; at the top it goes to the user.
+[heuristic.tiers]
+low  = { claude = "mid_claude", codex = "mid" }
+high = { claude = "senior", codex = "senior_astra" }
+top  = { claude = "director", codex = "director2" }
 [routing.usage]
 enabled = true
 claude_fallback = { producer = "mid", senior = "senior2", director = "director2", leveldesigner = "mid" }

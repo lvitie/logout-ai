@@ -21,7 +21,7 @@ focus = importlib.util.module_from_spec(spec)
 loader.exec_module(focus)
 
 NOW = time.mktime((2026, 10, 18, 17, 0, 0, 0, 0, -1))
-TOML = (ROOT / "templates/team.toml").read_text()
+from cfgutil import TOML  # noqa: E402
 
 
 def plain(lines):
@@ -64,15 +64,15 @@ class FocusTests(unittest.TestCase):
 
     def task(self, tid, **kw):
         self.write(f"{tid}/state.json", json.dumps({"id": tid, "change": tid, "request": kw.get("title", ""),
-                                                    "res": ["shared"], **kw}))
+                                                    "res": ["editor"], **kw}))
 
     def test_frame_sections(self):
         text = plain(focus.frame(NOW, 140, 60, pending=["work"], running_ids={"t001"}))
         self.assertIn("FOCUS Ship the save system.", text)
-        self.assertRegex(text, r"t001 +hook fix .*shared .*implement +mid→senior ov .* r2/3 10m/1h00m t001")
+        self.assertRegex(text, r"t001 +hook fix .*editor .*implement +mid→senior ov .* r2/3 10m/1h00m t001")
         self.assertIn("checking the diff", text)
         self.assertIn("running 1/3", text)
-        self.assertIn("shared:t001", text)
+        self.assertIn("editor:t001", text)
         self.assertRegex(text, r"t002 +stale .*team run t002")
         self.assertRegex(text, r"t003 +gate +Architect: pick a format")
         self.assertRegex(text, r"t004 +corrupt")
@@ -80,7 +80,7 @@ class FocusTests(unittest.TestCase):
         self.assertIn("you       Approve the art style", text)
         self.assertNotIn("Write loader", text)
         self.assertIn("pending: work", text)
-        self.assertRegex(text, r"1\. t006 +queued work  shared busy \(t001\)")
+        self.assertRegex(text, r"1\. t006 +queued work  editor busy \(t001\)")
         self.assertIn("finished today", text)
         self.assertNotIn("yesterday", text)
 
@@ -92,6 +92,17 @@ class FocusTests(unittest.TestCase):
         self.assertRegex(text, r"NEEDS YOU \d+ · QUEUE 1 · DONE 1")
         self.assertIn("pending check unavailable", text)
         self.assertTrue(all(len(ln) <= 60 for ln in text.splitlines()))
+
+    def test_latest_launch_gives_agent_model_and_effort(self):
+        self.task("t009", status="running", route="simple", domain="code", stage=0, title="pinned", stage_started=NOW - 60,
+                  launches=[{"stem": "01-implement-qa_bot", "agent": "qa_bot", "profile": "mid", "cli": "claude",
+                             "model": "pin-model", "effort": "xhigh"}])
+        self.write("t009/logs/01-implement-qa_bot.prompt.md", "")
+        os.utime(self.runs / "t009/logs/01-implement-qa_bot.prompt.md", (NOW - 30, NOW - 30))
+        s = {**json.loads((self.runs / "t009/state.json").read_text()), "dir": self.runs / "t009"}
+        self.assertEqual(focus.stage_info(s, NOW), ("implement", "mid", "qa_bot", "xhigh"))
+        self.assertIn("mid→qa_bot", plain(focus.frame(NOW, 140, 60, pending=[], running_ids={"t009"})))
+        self.assertIn("pin-model", plain(focus.frame(NOW, 140, 60, pending=[], running_ids={"t009"})))
 
     def test_run_lock_probe(self):
         d = self.runs / "t001"

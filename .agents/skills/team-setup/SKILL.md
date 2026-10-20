@@ -1,6 +1,6 @@
 ---
 name: team-setup
-description: Tailor the Logout AI agent team to a project. Interview the user about the project, propose project-specific agents (roles, models, domains, routing, locks, probes, shared rules) and write team.toml and role prompt files only after the user confirms. Use when asked to set up, configure, tailor, or reconfigure the agent team, add, change, or remove team agents or roles, or when team.toml still holds the generic setup preset. Not for running tasks (team new) or installing the team into a project (scripts/setup-agent-team.sh).
+description: Tailor the Logout AI agent team to a project. Start from the bundled game-development defaults (discipline agents, game domains, task skills, heuristic rules, p4/Unreal VCS and editor/GPU/build locks), confirm and tailor them with the user (models, domains, locks, probes, shared rules) and write team.toml and prompt files only after the user confirms. Use when asked to set up, configure, tailor, or reconfigure the agent team, add, change, or remove team agents, domains or roles, or when team.toml still holds the untouched setup preset. Not for running tasks (team new) or installing the team into a project (scripts/setup-agent-team.sh).
 ---
 
 # Team Setup
@@ -8,6 +8,21 @@ description: Tailor the Logout AI agent team to a project. Interview the user ab
 Works the same from the Claude Code and Codex coordinator chats. The output is
 an edited `team.toml` plus prompt files under its `templates_dir`; nothing is
 written before the user confirms the proposal.
+
+This branch is the game-dev variant. The setup preset already ships a complete
+team, so the interview confirms and tailors it, it does not design one from
+scratch:
+
+- Agents (discipline identity, no model): `producer`, `designer`, `gameplay`,
+  `engine`, `tools`, `technical_artist`, `audio`, `qa`, `build_release`,
+  `director`, plus the generic `mid`, `senior`, `architect`.
+- Domains with full stage tables: `gameplay`, `engine`, `tools`, `technical_art`,
+  `audio`, `design`, `build`. Model and effort come from the route's `[roles]`
+  profile and `[heuristic]` (tiers low/mid/high/top/apex, rules `hard-route`, `high-risk`,
+  `repeat-failures`), not from the agent.
+- Task skills: `shaders`, `animation`, `level-design`, `balancing`, `netcode`,
+  `optimization`, `perf-capture`, `tdd`, `unreal-review`.
+- VCS `p4` (Unreal/Perforce) and locks `editor` (default), `gpu`, `build`.
 
 ## Inputs
 
@@ -17,9 +32,9 @@ written before the user confirms the proposal.
   Logout AI checkout first.
 - The agent team source: `$LOGOUT_AI_ROOT/agent-team`, else the `agent-team/`
   directory next to the `.agents/` folder that holds this skill. Read
-  `templates/team.toml` (every key, commented), `templates/roles/*.md`,
-  `templates/jobs/route.md`, `write_config.py` (model presets), and the Config
-  section of `docs/AGENT_TEAM.md`.
+  `templates/team.toml` (every key, commented), `templates/agents/*.md`, `templates/skills/*.md`,
+  `templates/roles/common.md`, `templates/jobs/route.md`, `write_config.py`
+  (model presets), and the Config section of `docs/AGENT_TEAM.md`.
 
 ## Workflow
 
@@ -36,7 +51,8 @@ written before the user confirms the proposal.
      one message with numbered questions and suggested defaults, then end the
      turn and wait for the reply.
 
-   Cover only what step 1 left open:
+   Present the defaults above as the proposal and ask only what step 1 left open or
+   what the user may want to change:
    - **Workspace:** in the first round, show the project root read in step 1
      (`[project].root`) and have the user confirm it; a wrong workspace
      invalidates every later answer.
@@ -45,19 +61,35 @@ written before the user confirms the proposal.
      existing `[vcs].kind` or any other file (a p4 project can also contain
      `.git`), and never skip the question; show the current `[vcs].kind` only
      as the suggested default.
-   - **Work:** what the project is and which kinds of work the team will get.
-     These become the `[routing].domains`, for example `code`, `ui`, `docs`,
-     `data`, `infra`, `assets`.
-   - **Specialists:** areas that need a dedicated agent, such as a frontend,
-     database, shader, or docs writer. Ask whether each one should own a domain
-     (`domain_roles`: it plans and builds that domain) or take side tasks
-     (`side_task_roles`, used by `team new --role`).
+   - **Work:** what the game is (engine, platforms, team size) and which of the
+     seven default domains to keep. Offer to add a domain (for example `ui` or
+     `live_ops`) with its own stage table. Removing a domain means dropping every
+     reference or the config no longer loads: its name in `routing.domains`, its
+     `[routing.domain.X]` table, its entry in `review_extra_domains`, any
+     `[routing.side_task_domains]` value pointing at it, and any
+     `[[heuristic.rule]]` with `when.domain = X`. Remove the disciplines that no
+     remaining domain, side task or reviewer uses only if the user wants.
+   - **Specialists:** areas that need a dedicated agent, not covered by the bundled disciplines, such as localization,
+     live ops, or cinematics. Ask whether each one should own stages of a
+     domain (`[routing.domain.<name>]`) or take side tasks (`side_task_roles`,
+     used by `team new --role`).
+   - **Domain stages:** show the shipped `[routing.domain.<name>]` tables of
+     the kept domains as the proposal and ask only for changes. A new domain
+     needs its own table: the plan reviewer must differ from the planner and the
+     reviewer from the implementer. `domain_roles` is deprecated.
+   - **Task skills:** recurring instructions that apply to some tasks only
+     (for example a test-first routine, a performance capture, an engine review
+     checklist), not to a whole domain. Ask which the project wants.
    - **Agents and budget:** `claude`, `codex`, or both, and cost versus
      quality. This sets `cli`, `model`, and `effort` per role. Use only model ids
      that are already in `team.toml` or the `write_config.py` presets, unless
      the user names others.
-   - **Shared resources:** what two tasks must not use at once, such as a dev
-     server, editor, GPU, database, or emulator (`[locks]`), how many tasks may
+   - **Shared resources:** the defaults are `editor` (every task holds it, so tasks
+     run one at a time), `gpu` (GPU captures or renders; free-memory check skipped
+     while `editor` is held) and `build` (standalone compiles, cooks, packaging).
+     Tasks pick others with `team new --res gpu|build|none` (`none` = read-only or
+     tool-only work); ask which areas may run in parallel and what else must not
+     be shared (`[locks]`), how many tasks may
      run together (`max_parallel`), and local services the agents depend on
      (`[probes]`, name = URL).
    - **Rules:** build, test, and lint commands, areas agents must not touch,
@@ -67,8 +99,8 @@ written before the user confirms the proposal.
      unchecked items under "## Current phase" or ROADMAP.md is missing or empty:
      the project goal, the first milestone, and 3-8 first work items. Draft
      them from the README and the answers above; ask only what those leave open.
-     Also say that with the default single `shared` lock tasks run one at a time,
-     and ask which areas can run in parallel (separate `[locks]`).
+     Also say that with the default `editor` lock tasks run one at a time,
+     and ask which areas can run in parallel (`--res`, narrower `default`).
    - **Queue autonomy:** which Producer refill proposals the coordinator may
      queue without asking. Default: those without a `(needs user: ...)`
      suffix (current-phase work); alternatives: every proposal, or none.
@@ -80,10 +112,12 @@ written before the user confirms the proposal.
      (and `review_cadence_rule` for `custom`) in `team.toml`.
    - **Review:** which domains or routes get an extra review
      (`review_extra_domains`, `extra_review_routes`, `extra_review_role`), and
-     how many failed review rounds to allow before escalating (`max_rounds`).
+     how many minor failed review rounds to allow before escalating to the user (`max_rounds`); major/critical
+     failures step the tier ladder instead.
 3. Propose everything in one message:
    - A roles table with key, name, CLI, model, effort, and what the role owns.
-   - Each domain with a one-line meaning and its owner.
+   - Each domain with a one-line meaning and its stage agents (the defaults, and
+     the changes).
    - Pipeline, takeover, and review changes, and the locks, probes, and
      `max_parallel` settings.
    - The project rules for `common.md`, written out in full.
@@ -96,20 +130,22 @@ written before the user confirms the proposal.
 4. Write only what was confirmed:
    - Set `[vcs]` from the VCS answer, replacing the whole `[vcs]` span up to
      `[agents]`:
-     - `git`: keep the template block (`kind = "git"`, `guard_names = ["git"]`,
-       the git `[vcs.deny]` and `[vcs.deny_flags]`).
-     - `p4`: copy the `[vcs]` block of `examples/unreal-p4/team.toml`
-       (`kind = "p4"` with the `vcs_p4.py` adapter, `guard_names = ["p4", "git"]`,
-       its `[vcs.deny]` and `[vcs.deny_flags]`, git denied entirely).
+     - `p4` (the template default): keep the block (`kind = "p4"` with the
+       `vcs_p4.py` adapter, `guard_names = ["p4", "git"]`, its `[vcs.deny]` and
+       `[vcs.deny_flags]`, git denied entirely).
+     - `git`: use the `GIT` block of `write_config.py` (`kind = "git"`,
+       `guard_names = ["git"]`, the git `[vcs.deny]` and `[vcs.deny_flags]`).
      - `none`: `kind = "none"`, `guard_names = []`, empty `[vcs.deny]` and
        `[vcs.deny_flags]`. No guard, no deny rules, no submit step.
    - Edit `team.toml` in place. Keep the keys and comments you do not change.
      Keep the canonical roles `producer`, `mid`, `senior`, `architect`, and
      `director`. Give new roles lowercase keys. Every role named under
      `[routing]` must exist.
-   - `<templates_dir>/roles/<key>.md` for each new or retuned role. Write one
-     paragraph, "You are the <name> of the {project} agent team: <scope>.",
-     then the expertise, tools, and method lines that matter for the role.
+   - `<templates_dir>/agents/<key>.md` for each new or retuned role: frontmatter
+     (`name` equal to the file name, `[a-z0-9_]+`; `scope`; optional `model` and
+     `effort` pin), then the body: one paragraph, "You are the <name> of the
+     {project} agent team: <scope>.", then the expertise, tools, and method
+     lines that matter for the role. A plain `roles/<key>.md` still works.
    - `<templates_dir>/roles/common.md`: copy the bundled `common.md`, keep all
      of its rules (they are the team protocol), and append the project rules.
    - `<templates_dir>/coordinator-policy.md`, only when the user chose a
@@ -117,12 +153,20 @@ written before the user confirms the proposal.
      which refill proposals the coordinator queues without asking. Only the
      coordinator reads this file; `roles/common.md` reaches every agent, so the
      policy does not go there.
-   - `<templates_dir>/roles/producer.md`: the bundled Producer line plus one
-     line per domain saying what work belongs to it, so the Producer can route.
+   - `<templates_dir>/agents/producer.md` only if the user wants a different
+     Producer prompt: keep the `{domain_guide}` placeholder, which the team fills with
+     one line per configured domain (the scope of its implement agent), so the
+     Producer can route. Do not write per-domain lines by hand.
+   - `<templates_dir>/skills/<name>.md` for each confirmed task skill
+     (`[a-z0-9_-]+`; first line a `# title`, then terse bullets). The bundled
+     skills (see above) work without a copy; a file of
+     the same name in `skills/` overrides them. They are task skills: users
+     attach them with `team new --skill name[@stage]` and the Producer may
+     suggest them; never put them in an agent file.
    - Use the placeholders `{project}`, `{change_noun}`, `{state_dir}`, `{docs}`,
      and `{domains}` instead of hard-coding those values.
    - Do not override `jobs/` or `vcs/` unless the user asked for it. The
-     STATUS, VERDICT, ROUTE, DOMAIN, and TITLE lines are parsed by the team.
+     STATUS, VERDICT, ROUTE, DOMAIN, TITLE, and SKILLS lines are parsed by the team.
    - Plan seed, only when the Plan question was asked and confirmed: write
      ROADMAP.md (goal, milestones as outcomes) and the planning file's
      "## Current phase" with the first items as unchecked `- [ ]` lines, each

@@ -190,7 +190,11 @@ perform destructive changes unless those actions are requested explicitly.
 ## Set up the agent team
 
 The agent team (`agent-team/`) runs Claude Code and Codex CLI agents as a small
-team inside one of your projects. A Producer routes each request, then plan,
+game-development team inside one of your projects. It ships game-dev defaults:
+discipline agents (designer, gameplay, engine, tools, technical artist, audio,
+QA, build/release, director), seven domains, task skills, a model ladder with
+the `hard-route`, `high-risk` and `repeat-failures` rules, `p4` as the VCS, and
+the `editor`, `gpu` and `build` locks. A Producer routes each request, then plan,
 implement, and review stages run one agent at a time, handing off through files.
 Agents never commit, push, or submit; you review the result and commit it
 yourself. See [docs/AGENT_TEAM.md](docs/AGENT_TEAM.md) for the full reference.
@@ -256,7 +260,7 @@ setup warns when it is not. To add it for your user:
 ### 2. Review `team.toml`
 
 Check the role models and effort levels, `[locks]` for exclusive resources
-such as an editor or GPU, and `[probes]` for local services the agents depend
+such as the editor, GPU or build (the template ships `editor`, `gpu` and `build`), and `[probes]` for local services the agents depend
 on. For project rules, set `templates_dir` and put them in
 `<templates_dir>/roles/common.md`. The commented template documents every
 option.
@@ -300,8 +304,8 @@ keeps a `team wait` running, so it hears about gates, failures and finished
 tasks without polling. When the queue runs low, the Producer proposes the next
 tasks from `TASKS.md` and the roadmap; you promote or reject them
 (`team promote p001`, `team reject p002`). To tailor the team to the project, ask the coordinator
-to set up the team: it interviews you, proposes project-specific agents, and
-writes `team.toml` and the role prompts once you confirm. The same actions are available as commands from the project directory:
+to set up the team: it interviews you to confirm and tailor the shipped game-dev
+defaults, and writes `team.toml` and the role prompts once you confirm. The same actions are available as commands from the project directory:
 
 ```text
 team new "add a stamina bar"     # create a task, route it, run the pipeline
@@ -425,7 +429,7 @@ dependency review for pull requests.
 - `.agents/skills/`: reusable skills
 - `codex-plugins.txt`: opt-in Codex plugin selections
 - `codex-home/`: portable global instructions, configuration, profiles, and rules
-- `agent-team/`: project-agnostic Claude/Codex agent team coordinator (`team`, `team-up`, TUIs); `examples/` holds a sample config
+- `agent-team/`: game-dev Claude/Codex agent team coordinator (`team`, `team-up`, TUIs); `examples/` holds a sample config
 - `docs/`: reference documentation loaded only when explicitly requested
 - `scripts/`: installation, project setup, integration tests, and validation
 

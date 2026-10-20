@@ -6,6 +6,8 @@ import subprocess
 import tempfile
 import unittest
 
+from cfgutil import config_text
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -20,9 +22,7 @@ class LauncherTests(unittest.TestCase):
             fake.mkdir()
             launcher = (ROOT / 'templates/team.sh').read_text().replace('@@LOGOUT_AI_ROOT@@', shlex.quote(str(ROOT.parent)))
             (project / 'team.sh').write_text(launcher)
-            config = (ROOT / 'templates/team.toml').read_text().replace('cli = "claude"', 'cli = "codex"')
-            config = config.replace('kind = "git"', f'kind = "{vcs}"')
-            (project / 'team.toml').write_text(config)
+            (project / 'team.toml').write_text(config_text('codex', vcs))
             log = root / 'calls'
             (fake / 'codex').write_text('#!/bin/sh\nexit 99\n')
             (fake / 'codex').chmod(0o755)

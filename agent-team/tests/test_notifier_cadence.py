@@ -9,7 +9,7 @@ sys.path.insert(0, str(ROOT))
 import team  # noqa: E402
 import teamcfg  # noqa: E402
 
-TOML = (ROOT / "templates/team.toml").read_text()
+from cfgutil import TOML  # noqa: E402
 DAY1, DAY2 = "2026-10-20", "2026-10-21"
 OPEN, SHUT = ("Phase 2", 1), ("Phase 2", 0)
 
