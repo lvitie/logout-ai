@@ -126,6 +126,14 @@ try {
     Assert-Condition ($p4Config -match '(?m)^kind = "p4"' -and $p4Config -match '(?m)^git = \["\*"\]') 'p4 preset was not written'
     Assert-Condition (-not ([System.IO.File]::ReadAllLines((Join-Path $p4Repo '.git/info/exclude')) -contains '/.agent-team/')) 'git exclude written for a p4 project'
 
+    # No VCS: kind none, empty guard names, and no git exclude entry even inside a git repository.
+    $noneRepo = Join-Path $testRoot 'repo-none'
+    & git init -q $noneRepo
+    & $setup $noneRepo -BinDir $bin -Agents claude -Vcs none | Out-Null
+    $noneConfig = [System.IO.File]::ReadAllText((Join-Path $noneRepo 'team.toml'))
+    Assert-Condition ($noneConfig -match '(?m)^kind = "none"' -and $noneConfig -match '(?m)^guard_names = \[\]') 'none preset was not written'
+    Assert-Condition (-not ([System.IO.File]::ReadAllLines((Join-Path $noneRepo '.git/info/exclude')) -contains '/.agent-team/')) 'git exclude written for a project without VCS'
+
     Write-Output 'agent team PowerShell setup test passed'
 }
 finally {

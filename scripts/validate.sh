@@ -59,6 +59,11 @@ required_files=(
   "docs/CODEX_LAYOUT.md"
   "docs/SKILLS.md"
   "docs/WORKFLOW.md"
+  "docs/RULESET_RUNBOOK.md"
+  "docs/rulesets/default-branch.json"
+  "scripts/check-required-checks.sh"
+  "scripts/check-hosted-settings.sh"
+  "scripts/test-check-scripts.sh"
   ".github/dependabot.yml"
   ".github/pull_request_template.md"
   ".github/workflows/validate.yml"
@@ -268,6 +273,9 @@ actual_skills="$(printf '%s' "$actual_skills" | sort)"
 [[ "$documented_skills" == "$actual_skills" ]] ||
   fail "docs/SKILLS.md does not match .agents/skills"
 
+bash "$repo_root/scripts/check-required-checks.sh" --local ||
+  fail "required check names drift between docs/REQUIRED_CHECKS.md, docs/rulesets and validate.yml"
+
 for forbidden in auth.json history.jsonl installation_id state_5.sqlite goals_1.sqlite memories_1.sqlite; do
   [[ ! -e "$repo_root/$forbidden" ]] || fail "runtime file must not be tracked: $forbidden"
 done
@@ -290,6 +298,9 @@ if ! bash -n \
   "$repo_root/scripts/test-setup-project.sh" \
   "$repo_root/scripts/setup-agent-team.sh" \
   "$repo_root/scripts/test-setup-agent-team.sh" \
+  "$repo_root/scripts/check-required-checks.sh" \
+  "$repo_root/scripts/check-hosted-settings.sh" \
+  "$repo_root/scripts/test-check-scripts.sh" \
   "$repo_root/agent-team/bin/team" \
   "$repo_root/agent-team/templates/team.sh" \
   "$repo_root/agent-team/notify" \
@@ -305,6 +316,9 @@ if command -v shellcheck >/dev/null 2>&1; then
     "$repo_root/scripts/test-setup-project.sh" \
     "$repo_root/scripts/setup-agent-team.sh" \
     "$repo_root/scripts/test-setup-agent-team.sh" \
+    "$repo_root/scripts/check-required-checks.sh" \
+    "$repo_root/scripts/check-hosted-settings.sh" \
+    "$repo_root/scripts/test-check-scripts.sh" \
     "$repo_root/agent-team/bin/team" \
     "$repo_root/agent-team/templates/team.sh" \
     "$repo_root/agent-team/notify" \
@@ -416,6 +430,10 @@ esac
 
 if ! bash "$repo_root/scripts/test-setup-project.sh"; then
   fail "project setup integration test failed"
+fi
+
+if ! bash "$repo_root/scripts/test-check-scripts.sh"; then
+  fail "check script fixture test failed"
 fi
 
 if [[ "$(uname -s)" == Linux ]] && ! bash "$repo_root/scripts/test-setup-agent-team.sh"; then

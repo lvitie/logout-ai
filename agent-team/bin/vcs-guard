@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Agent-team PATH guard, installed under each [vcs].guard_names entry: refuses the VCS subcommands listed in
-[vcs].deny (config from $TEAM_CONFIG), also when reached through an alias, and forwards everything else to the real
-tool ($TEAM_REAL_<TOOL>, else the first non-guard match on PATH). A guardrail against accidents, not a security
-boundary: an agent can still call the real binary by path."""
+[vcs].deny (config from the guard's own install, else $TEAM_CONFIG), also when reached through an alias, and
+forwards everything else to the real tool ($TEAM_REAL_<TOOL>, else the first non-guard match on PATH). Git runs
+unrestricted (except push) in a repo outside the project root (temp-dir test fixtures). A guardrail against
+accidents, not a security boundary: an agent can still call the real binary by path."""
 import os
 import shlex
 import shutil
@@ -33,18 +34,52 @@ def flag_hit(arg, flags):
     return arg.startswith("-") and not arg.startswith("--") and any(f"-{c}" in flags for c in arg[1:])
 
 
-cfg = teamcfg.load()
+install = Path(sys.argv[0]).parent  # unresolved: the guard-bin dir
+root_file = install / "root"  # holds the project root
+root_dir = os.environ.pop("TEAM_GUARD_ROOT", "") or (root_file.read_text().strip() if root_file.is_file() else "")
+cfg_file = install / "config"  # holds the team.toml path
+cfg_path = os.environ.pop("TEAM_GUARD_CONFIG", "") or (cfg_file.read_text().strip() if cfg_file.is_file() else "")
+cfg = teamcfg.load(cfg_path or None)
 cls = vcs.adapter_class(cfg["vcs"]["kind"])
 own = cls.tool == tool
 deny = cfg["vcs"]["deny"].get(tool, [])
 sub, rest = vcs.subcommand(cls.arg_opts if own else frozenset(), argv)
 global_args = argv[:len(argv) - len(rest) - 1] if sub else argv
 seen = set()
-while True:
-    if "*" in deny or sub in deny:
+_exempt = []
+
+
+def outside_root():
+    """True when git would act on a repo that is not the project's (cached). Any doubt means False."""
+    if not _exempt:
+        _exempt.append(False)
+        try:
+            if tool != "git" or not own or not root_dir:
+                return False
+            root = os.path.realpath(root_dir)
+            probe = [real, "rev-parse", "--path-format=absolute", "--show-toplevel", "--git-common-dir"]
+
+            def run(args, cwd, env=None):
+                out = subprocess.run(args, cwd=cwd, env=env, capture_output=True, text=True, timeout=10)
+                return [os.path.realpath(x) for x in out.stdout.splitlines()] if out.returncode == 0 else []
+
+            top, common = (run([real, *global_args, *probe[1:]], os.getcwd()) + [None, None])[:2]
+            clean = {k: v for k, v in os.environ.items() if k not in ("GIT_DIR", "GIT_WORK_TREE")}
+            rcommon = (run(probe, root, clean) + [None, None])[1]
+            if not (top and common and rcommon):
+                return False
+            inside = lambda p: p == root or Path(p).is_relative_to(root)  # noqa: E731
+            _exempt[0] = not inside(top) and not inside(common) and common != rcommon
+        except (OSError, subprocess.SubprocessError):
+            pass
+    return _exempt[0]
+
+
+while True:  # push is never exempt: a clone outside the root still pushes into the project or its remotes
+    if ("*" in deny or sub in deny) and (sub == "push" or not outside_root()):
         sys.exit(f"agent team: '{tool} {sub}' is not allowed; the user does this.")
     flags = cfg["vcs"]["deny_flags"].get(tool, {}).get(sub, [])
-    if any(flag_hit(a, flags) for a in rest):
+    if any(flag_hit(a, flags) for a in rest) and (sub == "push" or not outside_root()):
         sys.exit(f"agent team: '{tool} {sub}' with {'/'.join(flags)} is not allowed.")
     expansion = cls(os.getcwd(), real).alias(global_args, sub) if own and sub and sub not in seen else None
     if expansion is None:

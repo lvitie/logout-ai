@@ -217,13 +217,16 @@ documented by the repository.
 - Require conversation resolution.
 - Require an independent approval when repository ownership makes that
   practical.
-- Confirm secret scanning, push protection, Dependabot, and dependency review.
+- Confirm secret scanning, push protection, Dependabot, and dependency review
+  (checklist documented in `docs/SECURITY_CONTROLS.md`; not yet confirmed;
+  `scripts/check-hosted-settings.sh` queries the hosted settings read-only).
 
 ### Dependencies and risks
 
 - Final CI check names must exist on the default branch before a ruleset can
   require them.
-- Repository ownership may make independent approval unavailable.
+- Repository ownership may make independent approval unavailable; see the
+  fallback gate in [required CI checks](docs/REQUIRED_CHECKS.md#review-gate).
 - An incorrect ruleset can block legitimate maintenance or emergency recovery.
 
 ### Exit criteria

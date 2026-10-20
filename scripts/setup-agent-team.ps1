@@ -11,7 +11,7 @@ param(
     [ValidateSet('claude', 'codex', 'both')]
     [string] $Agents = '',
 
-    [ValidateSet('git', 'p4')]
+    [ValidateSet('git', 'p4', 'none')]
     [string] $Vcs = ''
 )
 
@@ -140,14 +140,16 @@ function Read-Vcs {
     Write-Host 'Which version control does the project use?'
     Write-Host '  1) git  tasks share the working tree; agents never stage or commit'
     Write-Host '  2) p4   Perforce: each task gets its own changelist; agents never submit'
+    Write-Host '  3) none no version control: no guard, no deny rules, no submit step'
     while ($true) {
         $reply = Read-Host "Choice [$default]"
         if (-not $reply) { $reply = $default }
         switch ($reply) {
             { $_ -in '1', 'git' } { return 'git' }
             { $_ -in '2', 'p4', 'perforce' } { return 'p4' }
+            { $_ -in '3', 'none' } { return 'none' }
         }
-        Write-Host 'enter 1, 2, git or p4'
+        Write-Host 'enter 1, 2, 3, git, p4 or none'
     }
 }
 
@@ -281,6 +283,9 @@ else {
 
 if ($Vcs -eq 'p4') {
     $stateHint = ", add .agent-team/ to the project's P4IGNORE file"
+}
+elseif ($Vcs -eq 'none') {
+    $stateHint = ''
 }
 else {
     Add-StateDirExclude -ProjectPath $targetFullPath

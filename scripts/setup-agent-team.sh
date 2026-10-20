@@ -12,7 +12,7 @@ added_count=0
 skipped_count=0
 
 usage() {
-  printf 'usage: %s [--dry-run] [--bin-dir DIR] [--agents claude|codex|both] [--vcs git|p4] [--] PROJECT_PATH\n' "$(basename "$0")"
+  printf 'usage: %s [--dry-run] [--bin-dir DIR] [--agents claude|codex|both] [--vcs git|p4|none] [--] PROJECT_PATH\n' "$(basename "$0")"
 }
 
 fail() {
@@ -105,13 +105,15 @@ ask_vcs() {
   printf 'Which version control does the project use?\n'
   printf '  1) git  tasks share the working tree; agents never stage or commit\n'
   printf '  2) p4   Perforce: each task gets its own changelist; agents never submit\n'
+  printf '  3) none no version control: no guard, no deny rules, no submit step\n'
   while true; do
     read -r -p "Choice [$default]: " reply || reply=""
     case "${reply:-$default}" in
       1 | git) vcs=git ;;
       2 | p4 | perforce) vcs=p4 ;;
+      3 | none) vcs=none ;;
       *)
-        printf 'enter 1, 2, git or p4\n'
+        printf 'enter 1, 2, 3, git, p4 or none\n'
         continue
         ;;
     esac
@@ -191,10 +193,10 @@ while (($# > 0)); do
       shift 2
       ;;
     --vcs)
-      (($# >= 2)) || fail "--vcs requires git or p4"
+      (($# >= 2)) || fail "--vcs requires git, p4 or none"
       case "$2" in
-        git | p4) vcs="$2" ;;
-        *) fail "--vcs must be git or p4" ;;
+        git | p4 | none) vcs="$2" ;;
+        *) fail "--vcs must be git, p4 or none" ;;
       esac
       shift 2
       ;;
@@ -270,6 +272,8 @@ fi
 state_hint=", add .agent-team/ to the project ignore list"
 if [[ "$vcs" == p4 ]]; then
   state_hint=", add .agent-team/ to the project's P4IGNORE file"
+elif [[ "$vcs" == none ]]; then
+  state_hint=""
 elif exclude_state_dir; then
   state_hint=""
 fi

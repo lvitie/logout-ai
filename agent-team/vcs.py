@@ -14,6 +14,8 @@ class Vcs:
     noun = "working-tree changes"  # what a "change" is called in prompts
     arg_opts = frozenset()  # global options taking an argument (to find the subcommand in vcs-guard)
     state_dir = None  # the team's state dir, set by make(); adapters leave it out of opened/diff
+    submit_step = True  # False: nothing to submit, so prompts and reasons do not mention it
+    sandbox_network = True  # Codex sandbox needs network for the tool (p4 edit/add reach a server)
 
     def __init__(self, root, real=None):
         self.root = Path(root)
@@ -66,6 +68,7 @@ class Git(Vcs):
     """Git mapping: change id = task id (given as hint), description lives in task state only, all tasks share the
     working tree, so opened = `git status --porcelain -uall`. Nothing is staged or committed."""
     tool = "git"
+    sandbox_network = False
     arg_opts = frozenset({"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--exec-path", "--config-env"})
 
     def alias(self, global_args, sub):
@@ -102,10 +105,54 @@ class Git(Vcs):
         return ["work"] if self._status() else []
 
 
+class NoneVcs(Vcs):
+    """No version control: no tool, no guard, no submit step. The edit hook records each file an agent writes in
+    <state_dir>/<change>/touched.txt (change = task id), which stands in for opened/changed files; there is no diff."""
+    noun = "changes"
+    submit_step = False
+    sandbox_network = False
+
+    def new_change(self, desc, hint=""):
+        return hint or "work"
+
+    def _list(self, change):
+        return Path(self.state_dir or self.root / ".agent-team") / str(change) / "touched.txt"
+
+    def _record(self, path, change):
+        f = Path(path).resolve()
+        if self.state_dir and Path(self.state_dir) in f.parents:
+            return True, ""
+        try:
+            rel = f.relative_to(self.root.resolve()).as_posix()
+        except ValueError:
+            return True, ""
+        log = self._list(change)
+        log.parent.mkdir(parents=True, exist_ok=True)
+        with log.open("a") as fh:
+            fh.write(rel + "\n")
+        return True, ""
+
+    prepare_edit = add = _record
+
+    def opened_files(self, change):
+        try:
+            return sorted(set(self._list(change).read_text().splitlines()))
+        except OSError:
+            return []
+
+    def opened(self, change):
+        return "\n".join(self.opened_files(change))
+
+    def pending_changes(self):
+        return []
+
+
 def adapter_class(kind):
-    """git is built in; any other [vcs].kind X is the class `Adapter` in module vcs_X next to this file."""
+    """git and none are built in; any other [vcs].kind X is the class `Adapter` in module vcs_X next to this file."""
     if kind == "git":
         return Git
+    if kind == "none":
+        return NoneVcs
     try:
         return importlib.import_module(f"vcs_{kind}").Adapter
     except ImportError:

@@ -16,6 +16,7 @@
 - [x] Add `scripts/setup-agent-team.sh` with `--dry-run` and its integration test.
 - [x] Add unit and smoke tests and wire them into `validate.sh`.
 - [ ] Run a real Claude/Codex task end to end in a scratch git project (needs the user's logins).
+  Checklist: `docs/E2E_SMOKE.md` Part A.
 - [x] Ask for claude, codex or both during setup; harden the git guard; pin the Codex writer sandbox.
 - [x] Review and commit.
 - [x] Generate an additive `team.sh` launcher with missing-dependency installation
@@ -35,6 +36,12 @@
   right. Local validation passed: 61 Python tests, Linux and native Windows
   setup integration, and `scripts/validate.sh` (25 skills).
 - [ ] Verify the Windows setup integration test on Windows CI.
+  Expected on the `Validate (windows-latest)` leg (checked statically; no run seen yet):
+  green steps `Test PowerShell installer`, `Test PowerShell project setup`,
+  `Test PowerShell agent team setup` (ends with `agent team PowerShell setup test
+  passed`) and `Run agent team unit tests` with `Ran 13 tests ... OK` (test_bash_guard 2,
+  test_example_p4 2, test_focus_tui 3, test_windows_dashboard 6; zero tests would mean a
+  stale `-k` name). Tick this item only after a real run shows these.
 - [x] Ask for git or p4 during setup (`--vcs`/`-Vcs`, detected without a terminal).
 - [x] Port the Inferno fixes: no killing by name (PATH shims, Claude Bash hook,
   Codex rules), `--skip-git-repo-check` for Codex, `team status` skipping folders
@@ -47,6 +54,7 @@
   skill: an interactive interview (Claude and Codex) that proposes
   project-specific agents and writes them after confirmation.
 - [ ] Run `team-setup` interactively from a real Claude and Codex coordinator.
+  Checklist: `docs/E2E_SMOKE.md` Part B.
 - [x] Fix the agent-team review findings: atomic guard-bin, race-free task ids,
   capacity detection from CLI errors only with cycle-safe fallback, retrying the
   implementation after an escalated review, process-group reaping and signal
@@ -59,11 +67,24 @@
 - [x] Offer `team-setup` on the coordinator's first message until
   `[project] team_setup` records that it ran.
 
+## Next phase: Unattended queue
+
+From the [UX review](docs/AGENT_TEAM_UX_REVIEW.md).
+
+- [ ] Add a headless queue runner (detached `team queue` service) and warn in `team-up` when no runner is alive.
+- [ ] Auto-promote unsuffixed `pNNN` refill proposals inside the queue pass, honouring `coordinator-policy.md`.
+- [ ] Move the environment-failure auto-retry from the coordinator prompt into `team.py`: one retry, only for the
+  `rc!=0`/no-result failure, one `[routing]` cap key, marked `auto-retry: env`, unit test per branch.
+
 ## Next phase: Enforced repository governance
 
-- [ ] Configure a default-branch ruleset after CI check names exist remotely.
+- [ ] Configure a default-branch ruleset after CI check names exist remotely
+  (see [required CI checks](docs/REQUIRED_CHECKS.md) and the
+  [ruleset runbook](docs/RULESET_RUNBOOK.md)).
 - [ ] Require pull requests, successful validation, and conversation resolution.
-- [ ] Require an independent approval when repository ownership permits it.
+- [ ] Require an independent approval once a second maintainer exists. Until
+  then use the single-owner fallback gate in
+  [required CI checks](docs/REQUIRED_CHECKS.md#review-gate).
 
 ## Completion rule
 

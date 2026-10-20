@@ -67,16 +67,20 @@ def ensure_guards():
         for name in ("pkill", "killall"):
             _put(_guard_dir() / name, text=KILL_SHIM, mode=0o755)
     guard = HERE / "bin/vcs-guard"
+    _put(_guard_dir() / "root", text=f"{WS}\n")  # the guard lets git run in repos outside the root
+    _put(_guard_dir() / "config", text=f"{CFG['config_path']}\n")
     for name in CFG["vcs"]["guard_names"]:
         link = _guard_dir() / name
         if os.name != "nt":
             _put(link, target=guard)
             continue
         py = Path(sys.executable)
-        _put(link, text=f'#!/bin/sh\nTEAM_GUARD_TOOL={name} exec "{py.as_posix()}" -X utf8 "{guard.as_posix()}" "$@"\n',
+        _put(link, text=f'#!/bin/sh\nTEAM_GUARD_TOOL={name} TEAM_GUARD_ROOT="{WS.as_posix()}" '
+                  f'TEAM_GUARD_CONFIG="{Path(CFG["config_path"]).as_posix()}" exec "{py.as_posix()}" -X utf8 "{guard.as_posix()}" "$@"\n',
              newline="\n")
         _put(_guard_dir() / f"{name}.cmd",
-             text=f'@echo off\nsetlocal\nset "TEAM_GUARD_TOOL={name}"\n"{py}" -X utf8 "{guard}" %*\nexit /b %errorlevel%\n')
+             text=f'@echo off\nsetlocal\nset "TEAM_GUARD_TOOL={name}"\nset "TEAM_GUARD_ROOT={WS}"\n'
+                  f'set "TEAM_GUARD_CONFIG={CFG["config_path"]}"\n"{py}" -X utf8 "{guard}" %*\nexit /b %errorlevel%\n')
 
 
 def _put(path, text=None, target=None, mode=None, newline=None):
@@ -324,7 +328,7 @@ def agent_cmd(cli, model, effort, readonly, out):
         return cmd
     cmd = ["codex", "exec", "-m", model, "-c", f'model_reasoning_effort="{effort}"', "-C", str(WS),
            "--skip-git-repo-check", "--json", "-o", str(out)]  # Perforce and other non-git workspaces
-    if not readonly and CFG["vcs"]["kind"] != "git":  # p4 edit/add must reach the server from the sandbox
+    if not readonly and VCS.sandbox_network:  # p4 edit/add must reach the server from the sandbox
         cmd += ["-c", "sandbox_workspace_write.network_access=true"]
     # workspace-write keeps writes inside the workspace and .git read-only, whatever the user's Codex config says
     return cmd + ["-s", "read-only" if readonly else "workspace-write", "-"]
@@ -807,7 +811,8 @@ def advance(s, from_queue=False):
             else:
                 stages = pipeline(s["route"], s["domain"])
                 if s["stage"] >= len(stages):
-                    s["status"], s["reason"] = "done", f"Review {noun()} {s['change']} (`team review {s['id']}`); the user submits it."
+                    s["status"], s["reason"] = "done", (f"Review {noun()} {s['change']} (`team review {s['id']}`); the user submits it." if VCS.submit_step
+                                                         else f"Review the {noun()} (`team review {s['id']}`).")
                     s["finished"] = time.time()
                 else:
                     step(s, stages)
@@ -1181,6 +1186,70 @@ def first_seen():
     if pending or r["status"] == "failed":  # still needs the user, like a failed task
         return seen
     return {**seen, "refill": [r["status"], r["n"]]}
+
+
+CADENCES = ("task", "milestone", "daily", "custom")
+
+
+def normalize_cadence(v):
+    """(cadence, valid): anything outside CADENCES falls back to "task"."""
+    v = str(v or "").strip().lower()
+    return (v, True) if v in CADENCES else ("task", False)
+
+
+def current_phase(cfg=None):
+    """(heading, open_count) of the "## Current phase" section of planning_file; open_count counts "- [ ]" items
+    except the user's ("Owner: user", "user-only"). None when the file or the section is missing or unreadable."""
+    cfg = cfg or CFG
+    try:
+        text = (cfg["root"] / cfg["project"]["planning_file"]).read_text()
+    except (OSError, UnicodeError):
+        return None
+    head, n = None, 0
+    for ln in text.splitlines():
+        if ln.startswith("## "):
+            if head is not None:
+                break
+            if ln.lower().startswith("## current phase"):
+                head = ln[3:].strip()
+        elif head is not None and re.match(r"\s*- \[ \]", ln) and not re.search(r"owner:\s*user|user-only", ln, re.I):
+            n += 1
+    return None if head is None else (head, n)
+
+
+def review_due(cadence, state, today, phase):
+    """Ids to open one review page for, or [] (state: {"pending": [...], "date": "YYYY-MM-DD", "phase": heading};
+    phase heading recorded in place). Done tasks only: attention states always open and never come through here.
+    phase: current_phase() result; None means unknown, so milestone behaves as task and the phase is kept. A heading
+    change also ends the milestone, so a phase closed without a pass seeing 0 open items still gets its review."""
+    pending = state.get("pending", [])
+    moved = phase is not None and bool(state.get("phase")) and state["phase"] != phase[0]
+    if phase is not None:
+        state["phase"] = phase[0]
+    if cadence == "custom":
+        return []
+    if cadence == "milestone" and phase is not None and phase[1] > 0 and not moved:
+        return []
+    if cadence == "daily" and state.get("date") == today:
+        return []
+    return pending[:]
+
+
+def review_pass(cadence, state, done_ids, today, phase):
+    """One notifier pass over the cadence state {"known_done", "pending", "date", "phase"} (updated in place).
+    Done tasks not yet in known_done (also ones that finished while the notifier was down) join pending; returns the
+    ids to open now, which then leave pending. A missing state ("known_done" absent) starts from all current done tasks."""
+    if "known_done" not in state:
+        state["known_done"] = sorted(done_ids)
+    new = [t for t in sorted(done_ids) if t not in state["known_done"]]
+    state["known_done"] += new
+    # custom: the coordinator reviews, so nothing piles up to open at once after a switch to another cadence
+    state["pending"] = [] if cadence == "custom" else [t for t in state.get("pending", []) if t in done_ids] + new
+    due = review_due(cadence, state, today, phase)
+    if due:
+        state["pending"] = [t for t in state["pending"] if t not in due]
+        state["date"] = today
+    return due
 
 
 def wait_events(seen):

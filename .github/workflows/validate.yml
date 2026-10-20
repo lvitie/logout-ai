@@ -58,6 +58,11 @@ jobs:
         shell: pwsh
         run: ./scripts/test-setup-agent-team.ps1
 
+      # The other suites rely on POSIX (':' PATH joins, #!/bin/sh fakes, symlinks, bash).
+      - name: Run agent team unit tests
+        shell: pwsh
+        run: python -I -m unittest discover agent-team/tests -k test_bash_guard -k test_example_p4 -k test_focus_tui -k test_windows_dashboard
+
   dependency-review:
     name: Dependency review
     if: github.event_name == 'pull_request'

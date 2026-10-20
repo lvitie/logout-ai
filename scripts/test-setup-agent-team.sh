@@ -59,6 +59,15 @@ c = teamcfg.load(sys.argv[2])["vcs"]; print(c["kind"], *c["guard_names"], *c["de
 [[ "$vcs_kind" == "p4 p4 git *" ]] || fail "p4 preset has vcs: $vcs_kind"
 ! grep -qxF '/.agent-team/' "$tmp/repo-p4/.git/info/exclude" || fail "git exclude written for a p4 project"
 
+# No VCS: kind none, no guard, no deny rules, and no git exclude entry even inside a git repository.
+git init -q "$tmp/repo-none"
+"$repo_root/scripts/setup-agent-team.sh" --agents claude --vcs none --bin-dir "$bin" "$tmp/repo-none" >/dev/null 2>&1
+vcs_kind="$(python3 -I -c 'import sys; sys.path.insert(0, sys.argv[1]); import teamcfg
+c = teamcfg.load(sys.argv[2])["vcs"]; print(c["kind"], len(c["guard_names"]), len(c["deny"]), len(c["deny_flags"]))' \
+  "$repo_root/agent-team" "$tmp/repo-none/team.toml")" || fail "none preset does not load"
+[[ "$vcs_kind" == "none 0 0 0" ]] || fail "none preset has vcs: $vcs_kind"
+! grep -qxF '/.agent-team/' "$tmp/repo-none/.git/info/exclude" || fail "git exclude written for a project without VCS"
+
 # Each preset loads and uses the chosen CLIs; an existing repo gets the state dir excluded once.
 for agents in claude codex both; do
   repo="$tmp/repo-$agents"

@@ -474,6 +474,9 @@ class Project(unittest.TestCase):
         self.assertFalse((guard / "git").is_symlink())
         self.assertIn('set "TEAM_GUARD_TOOL=git"', (guard / "git.cmd").read_text())
         self.assertIn("vcs-guard", (guard / "git").read_text())
+        self.assertIn("TEAM_GUARD_ROOT=", (guard / "git").read_text())
+        self.assertIn('set "TEAM_GUARD_CONFIG=', (guard / "git.cmd").read_text())
+        self.assertEqual((guard / "root").read_text().strip(), str(self.proj.resolve()))
         sh = subprocess.run(["sh", str(guard / "git"), "commit", "-qm", "x"], cwd=self.proj, env=self.env,
                             capture_output=True, text=True, timeout=10)
         self.assertIn("not allowed", sh.stderr)
@@ -628,6 +631,29 @@ class Project(unittest.TestCase):
         page = (self.proj / ".agent-team/review/review.html").read_text()
         self.assertIn("id=t001", page)
         self.assertNotIn("id=t002", page)
+
+    def test_notifier_cadence_custom_skips_done_but_opens_attention(self):
+        opened = Path(self.tmp.name) / "opened"
+        browser = self.fake / "browser"
+        browser.write_text(f"#!{sys.executable}\nimport sys\nopen({str(opened)!r}, 'a').write(sys.argv[1] + '\\n')\n")
+        browser.chmod(0o755)
+        (self.proj / "team.toml").write_text((self.proj / "team.toml").read_text()
+                                             .replace('# review_cadence = "task"', 'review_cadence = "custom"'))
+        env = dict(self.env, BROWSER=str(browser), PATH=f"{self.fake}:/usr/bin:/bin")
+        for request in ("one", "two", "three"):
+            self.team("new", "--no-run", request)
+        run = lambda: subprocess.run([sys.executable, "-I", str(ROOT / "notifier"), "--once"], cwd=self.proj, env=env,
+                                     capture_output=True, text=True, timeout=30)
+        self.assertEqual(run().returncode, 0)
+        self.set_state("t001", status="done")
+        self.set_state("t002", status="blocked", reason="needs a key")
+        r = run()
+        self.assertIn("t002 blocked", r.stdout)
+        self.assertNotIn("t001 done", r.stdout)
+        page = (self.proj / ".agent-team/review/review.html").read_text()
+        self.assertIn("id=t002", page)
+        self.assertNotIn("id=t001", page)
+        self.assertEqual(json.loads((self.proj / ".agent-team/review_cadence.json").read_text())["pending"], [])
 
 
 if __name__ == "__main__":

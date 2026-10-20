@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 class LauncherTests(unittest.TestCase):
     def run_launcher(self, missing=False, fail=False, missing_cli=False, bad_checksum=False, cli_fail=False,
-                     architecture='x86_64', args=()):
+                     architecture='x86_64', args=(), vcs='git', missing_git=False):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             project = root / 'project with spaces'
@@ -21,6 +21,7 @@ class LauncherTests(unittest.TestCase):
             launcher = (ROOT / 'templates/team.sh').read_text().replace('@@LOGOUT_AI_ROOT@@', shlex.quote(str(ROOT.parent)))
             (project / 'team.sh').write_text(launcher)
             config = (ROOT / 'templates/team.toml').read_text().replace('cli = "claude"', 'cli = "codex"')
+            config = config.replace('kind = "git"', f'kind = "{vcs}"')
             (project / 'team.toml').write_text(config)
             log = root / 'calls'
             (fake / 'codex').write_text('#!/bin/sh\nexit 99\n')
@@ -28,12 +29,17 @@ class LauncherTests(unittest.TestCase):
             (fake / 'zellij').write_text('#!/bin/sh\nprintf "zellij %s\\n" "$*" >> "$MOCK_LOG"\n'
                                         'case "$1" in list-sessions) exit 1;; esac\n')
             (fake / 'zellij').chmod(0o755)
+            (fake / 'node').write_text('#!/bin/sh\nexit 0\n')  # the launcher installs nodejs when node is missing
+            (fake / 'node').chmod(0o755)
             harness = r'''
 command() {
   if [[ $1 == -v && $2 == zellij && $MOCK_MISSING == 1 && ! -x $HOME/.local/bin/zellij ]]; then
     return 1
   fi
   if [[ $1 == -v && $2 == codex && $MOCK_CLI_MISSING == 1 && ! -f $MOCK_CLI_READY ]]; then
+    return 1
+  fi
+  if [[ $1 == -v && $2 == git && $MOCK_GIT_MISSING == 1 && ! -f $MOCK_READY ]]; then
     return 1
   fi
   builtin command "$@"
@@ -70,7 +76,7 @@ exec bash "$@"
                        MOCK_LOG=str(log), MOCK_READY=str(root / 'ready'), MOCK_MISSING=str(int(missing)),
                        MOCK_BIN=str(fake), MOCK_BAD_CHECKSUM=str(int(bad_checksum)),
                        MOCK_CLI_MISSING=str(int(missing_cli)), MOCK_CLI_READY=str(root / 'cli-ready'),
-                       MOCK_CLI_FAIL=str(int(cli_fail)),
+                       MOCK_CLI_FAIL=str(int(cli_fail)), MOCK_GIT_MISSING=str(int(missing_git)),
                        MOCK_ARCH=architecture,
                        MOCK_FAIL=str(int(fail)), XDG_STATE_HOME=str(root / 'state'),
                        TEAM_CONFIG='/incorrect/config', LOGOUT_AI_ROOT=str(ROOT.parent))
@@ -87,6 +93,18 @@ exec bash "$@"
         self.assertNotIn('dnf', calls)
         self.assertIn('--session myproject-team', calls)
         self.assertIn(str(ROOT / 'chat'), layout)
+
+    def test_start_without_vcs_does_not_need_git(self):
+        for vcs in ('none', 'p4'):
+            with self.subTest(vcs=vcs):
+                result, calls, _ = self.run_launcher(vcs=vcs, missing_git=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertNotIn('dnf', calls)
+                self.assertIn('--session myproject-team', calls)
+        result, calls, _ = self.run_launcher(missing_git=True)  # control: a git project installs missing git
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('dnf install -y git', calls)
+        self.assertIn('--session myproject-team', calls)
 
     def test_install_missing_zellij(self):
         digests = {

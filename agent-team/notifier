@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Dashboard "alerts" pane: when a task needs the user (gate, blocked, escalated, failed, stale, slow, held; the
-events of `team wait`) or is done, pops a desktop notification and opens the HTML review page for it. Tasks already in
-such a state when it starts are reported once (done ones are not). Each pass also runs the queue (`team queue`): queued tasks start as capacity frees up.
+events of `team wait`) or is done, pops a desktop notification. It opens the HTML review page at once for tasks that need the user;
+done tasks open per [notify].review_cadence (task, milestone, daily; custom never: the coordinator decides). Tasks
+already in such a state when it starts are reported once (done ones are not, but join the cadence if new). Each pass also runs the queue (`team queue`): queued tasks start as capacity frees up.
 --once checks a single time and exits."""
+import json
 import os
 import shutil
 import subprocess
@@ -36,6 +38,33 @@ def notify(title, body, urgent):
         subprocess.Popen([os.path.join(HERE, "notify"), title, body, *(["urgent"] if urgent else [])], env=env, **QUIET)
 
 
+CADENCE_FILE = CFG["state"] / "review_cadence.json"
+_warned = []
+
+
+def cadence():
+    c, ok = team.normalize_cadence(N["review_cadence"])
+    if not ok and not _warned:
+        _warned.append(1)
+        print(f"notify.review_cadence {N['review_cadence']!r} is not one of {', '.join(team.CADENCES)}; using 'task'", flush=True)
+    return c
+
+
+def due_done():
+    """Done tasks whose review page opens now under [notify].review_cadence; the notifier alone writes the state file."""
+    try:
+        state = json.loads(CADENCE_FILE.read_text())
+    except (OSError, ValueError):
+        state = {}
+    done = {s["id"] for s in team.all_tasks() if s["status"] == "done"}
+    due = team.review_pass(cadence(), state, done, time.strftime("%Y-%m-%d"), team.current_phase())
+    CADENCE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    tmp = CADENCE_FILE.with_suffix(".tmp")
+    tmp.write_text(json.dumps(state))
+    os.replace(tmp, CADENCE_FILE)
+    return due
+
+
 def check(seen):
     try:
         team.dispatch()
@@ -45,8 +74,9 @@ def check(seen):
     for tid, status, reason in team.wait_events(seen):
         notify(f"{NAME}: {tid} {status}", reason[:180], status != "done")
         print(f"\a{time.strftime('%H:%M')} {tid} {status}: {reason[:180]}", flush=True)
-        if tid != "refill":  # proposals live in the queue file, not on a task page
+        if tid != "refill" and status != "done":  # proposals live in the queue file; done tasks follow the cadence
             review.append(tid)
+    review += due_done()
     if review:  # one page for everything that changed in this pass
         subprocess.run([sys.executable, os.path.join(HERE, "review_page"), *review, "--open"], **QUIET)
 

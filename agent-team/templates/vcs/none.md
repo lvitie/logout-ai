@@ -1,0 +1,1 @@
+VCS (none): the project has no version control; there is no guard and no submit step. Edit files in place and list every file you changed in your report; reviewers read those files directly. {change_noun} are tracked by the edit hook in the task folder.

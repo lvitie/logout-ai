@@ -83,6 +83,7 @@ if (-not $python) {
         Fail 'Python 3.11+ is required. Installation did not provide it on PATH.'
     }
 }
+# Git stays required here: Git Bash runs Claude Code's shell commands, whatever the project's [vcs] kind.
 if (-not (Test-OnPath 'git')) {
     # Git for Windows also provides Git Bash, which Claude Code uses for shell commands.
     Install-WingetPackage 'Git.Git'

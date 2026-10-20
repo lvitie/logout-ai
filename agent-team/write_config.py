@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Setup helper: write_config.py TEMPLATE DEST NAME claude|codex|both git|p4 writes team.toml with the project name,
+"""Setup helper: write_config.py TEMPLATE DEST NAME claude|codex|both git|p4|none writes team.toml with the project name,
 the role preset for the chosen agent CLIs and the VCS (used by scripts/setup-agent-team.sh and .ps1)."""
 import sys
 from pathlib import Path
@@ -17,7 +17,7 @@ BOTH = {"producer": CLAUDE["producer"], "mid": CODEX["mid"], "senior": CLAUDE["s
 NAMES = {"producer": "Producer", "mid": "Mid Dev", "senior": "Senior Dev", "architect": "Architect",
          "director": "Tech Director"}
 P4 = """[vcs]
-kind = "p4"                   # git, or any X with a vcs_X.py adapter
+kind = "p4"                   # git, p4, none, or any X with a vcs_X.py adapter
 guard_names = ["p4", "git"]   # tools shadowed on the agents' PATH by bin/vcs-guard
 [vcs.deny]                    # subcommands agents may not run per tool, also via aliases; "*" denies the tool entirely
 p4 = ["submit", "revert", "shelve", "unshelve", "obliterate", "sync", "clean", "flush", "integrate", "integ",
@@ -25,6 +25,12 @@ p4 = ["submit", "revert", "shelve", "unshelve", "obliterate", "sync", "clean", "
 git = ["*"]
 [vcs.deny_flags]              # tool -> subcommand -> refused flags (also inside combined short flags like -df)
 p4 = { change = ["-d", "-f"], changelist = ["-d", "-f"] }
+"""
+NONE = """[vcs]
+kind = "none"                 # git, p4, none, or any X with a vcs_X.py adapter
+guard_names = []              # no VCS: nothing is shadowed on the agents' PATH
+[vcs.deny]
+[vcs.deny_flags]
 """
 preset = {"claude": CLAUDE, "codex": CODEX, "both": BOTH}[agents]
 roles = "".join(f"[roles.{k}]\nname = \"{NAMES[k]}\"\ncli = \"{c}\"\nmodel = \"{m}\"\neffort = \"{e}\"\n"
@@ -36,4 +42,7 @@ text = text[:start] + roles + text[end:]
 if vcs == "p4":  # the template ships git; Perforce work goes in a changelist and agents may not use git at all
     start, end = text.index("[vcs]\n"), text.index("\n[agents]")
     text = text[:start] + P4 + text[end:]
+if vcs == "none":  # no VCS: no guard, no deny rules, no submit step
+    start, end = text.index("[vcs]\n"), text.index("\n[agents]")
+    text = text[:start] + NONE + text[end:]
 Path(dst).write_text(text.replace("name = \"myproject\"", f"name = \"{name}\"", 1))

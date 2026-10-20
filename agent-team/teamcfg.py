@@ -30,7 +30,8 @@ DEFAULTS = {
                 "usage": {"enabled": False}},
     "queue": {"refill": True, "low_water": 1, "batch": 3, "daily_cap": 10, "pause_needs_you": 2, "cooldown_min": 30},
     "prompts": {"readonly_note": "Read-only stage: use tools only to inspect, never to change."},
-    "notify": {"app_name": "", "sound_dir": "", "sound_normal": "message.oga", "sound_urgent": "alarm-clock-elapsed.oga"},
+    "notify": {"review_cadence": "task", "review_cadence_rule": "", "app_name": "", "sound_dir": "",
+               "sound_normal": "message.oga", "sound_urgent": "alarm-clock-elapsed.oga"},
     "probes": {},
     "usage": {"claude_endpoint": False},
 }
@@ -59,7 +60,10 @@ def find_config(start=None):
 
 def load(path=None):
     path = Path(path) if path else find_config()
-    cfg = _merge(DEFAULTS, tomllib.loads(path.read_text()))
+    raw = tomllib.loads(path.read_text())
+    cfg = _merge(DEFAULTS, raw)
+    cfg["notify"] = {**cfg["notify"]}
+    cfg["notify"]["review_cadence_set"] = bool(str(raw.get("notify", {}).get("review_cadence", "")).strip())
     cfg["routing"]["usage"] = _merge(USAGE_DEFAULTS, cfg["routing"]["usage"])
     cfg["config_path"] = str(path.resolve())
     base = path.resolve().parent

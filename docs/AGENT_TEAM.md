@@ -40,8 +40,10 @@ Then which version control the project uses:
 - `git`: the built-in adapter; tasks share the working tree and the guard refuses commits, staging and history edits.
 - `p4`: the Perforce adapter; each task gets a changelist, the guard refuses submit/revert/shelve/sync and the like,
   and git is denied entirely (the `[vcs]` block of `examples/unreal-p4/team.toml`).
+- `none`: no version control; no guard, no deny rules, no submit step, and no git exclude entry. The edit hook lists
+  the files agents write in `<state_dir>/<task>/touched.txt`; there is no diff, so reviewers read the files directly.
 
-Pass `--agents claude|codex|both` and `--vcs git|p4` (`-Agents`, `-Vcs`) to skip the questions; without a terminal
+Pass `--agents claude|codex|both` and `--vcs git|p4|none` (`-Agents`, `-Vcs`) to skip the questions; without a terminal
 setup picks what is on `PATH` (both, else codex, else claude) and detects the VCS (git for a git repository, else
 p4 when installed, else git). Usage balancing (`[routing.usage]`) stays off in every preset. For a git project that
 is already a repository, setup also adds the state directory (`.agent-team/`) to `.git/info/exclude`; otherwise add
@@ -67,8 +69,20 @@ team-up "request"                 # same as team new
 .\team.ps1                        # the same on Windows
 ```
 
+Review cadence (`[notify] review_cadence`; unset: the coordinator asks at session start and writes it, team-setup
+asks it too): `task` opens a review page for each done task (default), `milestone` when every `- [ ]` item of the
+planning file's `## Current phase` section is checked or its heading changes (items marked `Owner: user` or `user-only` do not count, so mark
+user-owned open items that way, e.g. `TASKS.md:10`; with no such section it behaves like `task`), `daily` for the done
+tasks of the day's first pass, and `custom` never opens them automatically: the coordinator follows
+`review_cadence_rule` (free text, e.g. "every 3 done tasks"), keeping the last reviewed id in `decisions.md`. Under
+`task`, `milestone` and `daily` the alerts pane (`notifier`) alone opens done-task pages, remembering unreported done
+tasks in `<state_dir>/review_cadence.json`; the coordinator never runs `team review` for them. Gates, blocked, escalated
+and failed tasks always reach you at once with their own page (except the coordinator's one env auto-retry). An invalid
+value falls back to `task`. Hand-offs
+stay Markdown; the review page is HTML for you only.
+
 `team.sh` works from any directory and selects Linux Git before user wrappers.
-On Fedora (`dnf`) or Debian/Ubuntu (`apt-get`), it installs missing Python, Git,
+On Fedora (`dnf`) or Debian/Ubuntu (`apt-get`), it installs missing Python, Git (only for `[vcs] kind = "git"`),
 download utilities and, when a configured agent CLI is missing, Node/npm.
 Missing Zellij is installed under `~/.local/bin` from the official 0.45.1
 Linux x86_64/aarch64 release, verified against pinned SHA-256 digests; no extra
@@ -103,13 +117,23 @@ ones (a stage running longer than `[routing].long_stage_min`, 120 by default, 0 
 pane notifies on the same events. It
 remembers what it reported in `.wait-seen.json`, so changes between two waits are reported by the next one. The
 first wait reports what needs attention but not tasks that were already done. Claude Code wakes the coordinator
-when its background `team wait` exits; a CLI without that runs `team wait --no-block` at the start of each turn.
+when its background `team wait` exits; a CLI without that runs `team wait --no-block` at the start and end of each
+turn. The coordinator never ends a turn without a `team wait` running: it acts on each exit, restarts the wait, then
+replies. It stops only for the user's input (gates, decisions, escalations) and handles environment trouble itself,
+once per task per session: a stale task gets `team run`; a failed task whose reason is "exited ... with no result",
+"gave no STATUS line", "gave no VERDICT line" or "Producer gave ROUTE=... DOMAIN=..." gets
+`team approve <id> "auto-retry: env (coordinator, not a user decision)"`, unless the task's `notes` already hold
+`auto-retry: env` or its raw log shows an auth, usage-limit or missing-CLI error (then it reports to the user).
+Every other failure, and gates, escalations and blocked tasks, wait for the user. Its first reply in a session
+(after the setup question) states the project root, VCS and branch so a wrong workspace is caught early.
+`docs/COORDINATOR_REVIEW.md` records the reasoning and the code changes proposed on top.
 
 The coordinator chat may edit the team config, its role prompts, the hand-edited state inputs and planning docs
 itself; project work still goes through `team new`. To tailor the team, ask the coordinator to set it up: it
 follows the `team-setup` skill (`.agents/skills/team-setup/SKILL.md`, passed to both CLIs by path), which
 interviews you about the project, proposes roles, models, domains, routing, locks, probes and shared rules, and
-writes `team.toml` and `<templates_dir>/roles/*.md` only after you confirm. It records the date in
+writes `team.toml`, `<templates_dir>/roles/*.md` and, for a non-default queue autonomy,
+`<templates_dir>/coordinator-policy.md` only after you confirm. It records the date in
 `[project] team_setup`; while that is empty, the coordinator's first reply in a session asks whether to run the setup
 now (Yes/No) instead of answering.
 
@@ -118,8 +142,14 @@ Queue refill (`[queue]`, on by default): when queued tasks plus planned `queue.t
 planning file's current phase, then `ROADMAP.md`, and proposes up to `batch` (3) tasks, skipping user-owned items
 and everything done, in flight, pending or rejected (it is shown that list). Proposals are appended as
 `pNNN: <request>` lines; nothing runs until `team promote` turns lines into queued tasks in place (order and
-`(after tNNN)` notes kept) or `team reject` drops them. `team wait` and the alerts pane report `refill proposed`,
-`refill empty` (no planned work left) and `refill failed`. Refill pauses while `pause_needs_you` (2) tasks wait for
+`(after tNNN)` notes kept) or `team reject` drops them. The Producer ends a proposal with `(needs user: <why>)` when
+it is not from the current phase or needs a user decision first. On `refill proposed` the coordinator promotes that
+event's pNNN lines without the suffix and shows the rest to the user; it never auto-promotes lines you wrote. An
+`## Auto-promote policy` section in `<templates_dir>/coordinator-policy.md` (read only by the coordinator) overrides
+that default. When you approve a suffixed line, the coordinator deletes the suffix before `team promote` unless a
+refill is running; the Producer does not route a task `ask` for the suffix alone. `team wait` and the alerts pane
+report `refill proposed`, `refill empty` (no planned work left; the coordinator tells you what to add),
+`refill failed` and `refill stale` (both retried after the cooldown without asking). Refill pauses while `pause_needs_you` (2) tasks wait for
 the user, after `daily_cap` (10) proposals a day, for `cooldown_min` (30) between runs, after an empty result until
 the planning file, `ROADMAP.md` or the number of done tasks changes, and while Claude usage is low.
 
@@ -150,7 +180,7 @@ the planning file, `ROADMAP.md` or the number of done tasks changes, and while C
 
 - `[project]`: `name`, `root` (relative to the file), `state_dir`, `docs` (told to the Producer), `queue_file`,
   `planning_file`, optional `templates_dir` (overrides `jobs/`, `roles/`, `vcs/` files by relative path).
-- `[vcs]`: `kind` (`git` or any `X` with `agent-team/vcs_X.py`), `guard_names`, `deny` (tool -> denied
+- `[vcs]`: `kind` (`git`, `none` or any `X` with `agent-team/vcs_X.py`), `guard_names`, `deny` (tool -> denied
   subcommands, `"*"` = whole tool), `deny_flags` (tool -> subcommand -> refused flags).
 - `[agents].deny_extra`: extra Claude `Bash(...)` deny rules. Rules from `[vcs.deny]` are added automatically.
 - `[locks]`: `names`, `default`; `[locks.<name>]` may set `min_free_mib`, `probe_cmd` (prints free MiB first) and
@@ -166,8 +196,8 @@ the planning file, `ROADMAP.md` or the number of done tasks changes, and while C
 - `[routing.usage]`: optional Claude/Codex plan balancing (`enabled = false` by default): `claude_fallback`,
   `limits`, `scoped_limit`, `surplus_swap`, `burst_swap`, `burst_file`, `cheap_first`, `no_burst_effort`,
   `escalation_gate`. Needs both CLIs and `usage_tui` data.
-- `[prompts]`, `[notify]`, `[usage]`: read-only stage note, notification app name and sound dir, and
-  `claude_endpoint`.
+- `[prompts]`, `[notify]`, `[usage]`: read-only stage note, notification `review_cadence`, `review_cadence_rule`,
+  app name and sound dir, and `claude_endpoint`.
 
 Prompt templates use `{project}`, `{change_noun}`, `{domains}`, `{docs}` and `{state_dir}`.
 
@@ -181,6 +211,9 @@ Adapters never submit, commit, stage, revert or shelve.
 - git: change id = task id, the description lives in task state only, all tasks share the working tree,
   `opened` = `git status --porcelain -uall`, `diff` = `git diff HEAD` plus `git diff --no-index` for untracked
   files, nothing is staged. Run one writing task at a time, or give parallel tasks separate worktrees.
+- none: change id = task id; the hook records each written file (root-relative, state dir skipped) in
+  `<state_dir>/<task>/touched.txt`, `opened` lists them, `diff` is empty. `submit_step = False` drops the "user submits it"
+  wording; `guard_names = []` installs no guard.
 - p4: a numbered pending changelist per task; the hook opens files with `p4 edit -c` and moves default-changelist
   strays into the task changelist.
 
@@ -188,10 +221,17 @@ Adapters never submit, commit, stage, revert or shelve.
 `<name>.cmd` and a Git Bash `<name>` shim that set `TEAM_GUARD_TOOL`), which is put first on the agents' `PATH` (`TEAM_REAL_<TOOL>` holds the real binary; without it the guard takes the first
 non-guard match on `PATH`). It refuses `[vcs.deny]` subcommands and `[vcs.deny_flags]` flags for both Claude and
 Codex agents, including when reached through a git alias (`-c alias.x=...` or configured), and refuses git shell
-aliases (`!...`). The guard is a guardrail against accidental commits, not a security boundary: an agent can still
+aliases (`!...`). `git` is exempt when the working directory is a repo outside the project root (temp-dir test
+fixtures, so `./scripts/validate.sh` and the unit tests run inside an agent): `team.py` writes `guard-bin/root` and
+`guard-bin/config` (and the Windows shims pass `TEAM_GUARD_ROOT`/`TEAM_GUARD_CONFIG`), and the guard checks
+`git rev-parse --show-toplevel --git-common-dir` (symlinks resolved, `-C`/`--git-dir`/`GIT_DIR` honoured, only at
+the point a denial would fire, so aliases are covered). `push` is never exempt. Anything inside the root, a worktree
+sharing the root's repo, a failed probe, missing guard files (old installs, until the next `team.py` run) or a non-git `[vcs].kind`
+stays denied. The guard is a guardrail against accidental commits, not a security boundary: an agent can still
 run the real binary by absolute path. The hard limit for Codex writers is its `workspace-write` sandbox, which keeps
 `.git` read-only (network access follows `[sandbox_workspace_write]` in the Codex config, off by default, except for
-writers when `[vcs].kind` is not git: `p4 edit`/`add` must reach the server); Claude agents get the same subcommands as
+writers when the adapter sets `sandbox_network = True`, as p4 and custom adapters do by default: `p4 edit`/`add` must
+reach the server; git and none keep it off); Claude agents get the same subcommands as
 `Bash(...)` deny rules. Codex has no edit hook, so the files its `file_change` events report are opened (`prepare_edit`)
 or added in the task's change as they arrive; a file that cannot be opened (e.g. locked elsewhere) blocks the task
 with the file named, and deletions are left to the agent.
@@ -256,6 +296,8 @@ The smoke test builds a temp git project with `HOME`, `GIT_CONFIG_GLOBAL` and th
 empty probes and fake `claude`/`codex` that exit 99, then checks config loading, task creation, status, the guard,
 the adapters, the shared journal and `review_page` escaping. No network and no real agents. `test_bash_guard.py`
 covers the kill hook and `test_focus_tui.py` renders the focus pane from fixture state.
+
+See the [UX review](AGENT_TEAM_UX_REVIEW.md) for known stalls and the follow-up queue.
 
 ## Porting a project
 

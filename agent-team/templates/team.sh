@@ -39,8 +39,13 @@ install_packages() {
   hash -r
 }
 
+# git is only needed when the project uses it ([vcs] kind = "git", the default); p4, none and custom kinds skip it.
+need_git=1
+vcs_kind=$(sed -nE 's/^kind[[:space:]]*=[[:space:]]*"([^"]*)".*/\1/p' "$project_root/team.toml" 2>/dev/null | head -n 1 || true)
+[[ -n $vcs_kind && $vcs_kind != git ]] && need_git=0
+
 missing=()
-for dependency in python3 git; do
+for dependency in python3 $( ((need_git)) && echo git ); do
   if ! command -v "$dependency" >/dev/null 2>&1; then
     missing+=("$dependency")
   fi
@@ -50,7 +55,7 @@ if ((${#missing[@]})); then
 fi
 python3 -c 'import sys; raise SystemExit(sys.version_info < (3, 11))' || fail 'Python 3.11+ is required. Upgrade your distribution Python and retry.'
 # Reject a broken or Windows Git wrapper before handing it to the coordinator.
-git --version >/dev/null || fail 'Linux Git is not working.'
+((need_git == 0)) || git --version >/dev/null || fail 'Linux Git is not working.'
 
 install_zellij() (
   # Official v0.45.1 release asset SHA-256 digests, pinned at implementation.
@@ -122,7 +127,7 @@ while IFS= read -r cli; do
   command -v "$cli" >/dev/null 2>&1 || fail "Installation did not provide $cli on PATH."
 done <<< "$agent_clis"
 
-for dependency in python3 git zellij; do
+for dependency in python3 $( ((need_git)) && echo git ) zellij; do
   command -v "$dependency" >/dev/null 2>&1 || fail "Installation did not provide $dependency on PATH."
 done
 cd -- "$project_root"

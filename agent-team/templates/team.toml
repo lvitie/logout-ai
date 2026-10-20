@@ -12,7 +12,7 @@ templates_dir = ""            # optional dir (relative to root) with jobs/, role
 team_setup = ""               # date the team-setup skill finished; empty: the coordinator offers it first
 
 [vcs]
-kind = "git"                  # git, or any X with a vcs_X.py adapter
+kind = "git"                  # git, p4, none, or any X with a vcs_X.py adapter
 guard_names = ["git"]         # tools shadowed on the agents' PATH by bin/vcs-guard
 [vcs.deny]                    # subcommands agents may not run per tool, also via aliases; "*" denies the tool entirely
 git = ["commit", "push", "pull", "reset", "checkout", "switch", "stash", "clean", "rebase", "merge", "restore", "add",
@@ -27,7 +27,8 @@ deny_extra = ["chmod"]        # more Claude Bash(...) deny rules (git commands c
 
 [locks]                       # resources a task may hold; same lock = exclusive, different locks run in parallel
 names = ["shared"]
-default = ["shared"]
+default = ["shared"]          # every task holds these: one shared lock means tasks run one at a time; add per-area
+                              # locks (and make default narrower) to run in parallel
 # [locks.gpu]                 # optional free-resource check before running next to other jobs
 # min_free_mib = 9000
 # probe_cmd = ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"]
@@ -48,6 +49,11 @@ cooldown_min = 30             # minutes between refills
 readonly_note = "Read-only stage: use tools only to inspect, never to change."
 
 [notify]
+# review_cadence = "task"     # when done tasks open a review page: task (each), milestone (all tasks of planning_file's
+#                             # "## Current phase" checked off), daily (first done task each day), custom (never
+#                             # automatic: the coordinator follows review_cadence_rule). Gates, blocked, escalated and
+#                             # failed tasks always open at once. Unset: the coordinator asks.
+# review_cadence_rule = ""    # custom only, free text, e.g. "every 3 done tasks"
 app_name = ""                 # default: project name
 sound_dir = ""                # e.g. /usr/share/sounds/freedesktop/stereo; empty = no sound
 sound_normal = "message.oga"

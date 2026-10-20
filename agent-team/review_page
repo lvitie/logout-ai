@@ -61,7 +61,7 @@ NEXT = {  # what the user does next, by status
     "blocked": "team redo {t} \"answer\"  # answer and re-run\nteam approve {t} [\"note\"]",
     "escalated": "team approve {t} [\"note\"]  # retry with fresh rounds\nteam redo {t} \"feedback\"\nteam drop {t} [\"note\"]",
     "failed": "team approve {t} [\"note\"]  # retry\nteam redo {t} \"feedback\"\nteam drop {t} [\"note\"]",
-    "done": "# review the changes above, then commit or submit them yourself\nteam redo {t} \"feedback\"  # more work",
+    "done": "# review the changes above{submit}\nteam redo {t} \"feedback\"  # more work",
 }
 
 
@@ -108,7 +108,7 @@ details{margin-top:8px}summary{cursor:pointer;color:#ff9a6b}nav a{margin-right:1
         if s.get("reason"):
             h.append(f"<p class=reason>{html.escape(s['reason'])}</p>")
         if s["status"] in NEXT:
-            h.append("<pre class=next>" + html.escape(NEXT[s["status"]].format(t=t)) + "</pre>")
+            h.append("<pre class=next>" + html.escape(NEXT[s["status"]].format(t=t, submit=", then commit or submit them yourself" if vcsmod.adapter_class(CFG["vcs"]["kind"]).submit_step else "")) + "</pre>")
         impl = last(t, "*implement*.md") or last(t, "*implementation*.md")
         rev = last(t, "*review-*.md")
         plan, label = last(t, "*-plan-*.md"), "Plan"
