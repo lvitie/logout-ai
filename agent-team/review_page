@@ -11,8 +11,10 @@ from pathlib import Path
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import teamcfg
 import vcs as vcsmod
+import team
 
 CFG = teamcfg.load()
+team.init()
 WS, RUNS = CFG["root"], CFG["state"]
 NAME = CFG["project"]["name"]
 OUT = RUNS / "review"
@@ -101,10 +103,19 @@ details{margin-top:8px}summary{cursor:pointer;color:#ff9a6b}nav a{margin-right:1
     dec = RUNS / "decisions.md"
     if dec.exists() and dec.read_text().strip():
         h.append("<div class=card id=decisions style='border-color:#ff7a45'><h2>Decisions needed</h2>" + md(dec.read_text()) + "</div>")
+    ml = team.metrics_lines()
+    if ml:
+        h.append("<div class=card id=metrics><h2>Route metrics</h2><pre class=next>" + html.escape("\n".join(ml)) + "</pre></div>")
     for t in tids:
         s = state(t)
         c = badge.get(s["status"], "#555")
         h.append(f"<div class=card id={t}><h2>{t} · {html.escape(s['title'] or s['request'].splitlines()[0])} <span class=b style='background:{c}'>{html.escape(s['status'])}</span> <small>{html.escape(str(s.get('change')))}</small></h2>")
+        if s.get("route"):
+            sk = team.skipped_kinds(s)
+            h.append(f"<p><small>route {html.escape(str(s['route']))}/{html.escape(str(s.get('domain')))}"
+                     + (f" · started as {html.escape(str(s['route_initial']))}" if s.get("route_initial") not in (None, s["route"]) else "")
+                     + (f" · <b>skipped: {html.escape(', '.join(sk))}</b>" if sk else "")
+                     + (f" · upgrades {s['upgrades']}" if s.get("upgrades") else "") + "</small></p>")
         if s.get("reason"):
             h.append(f"<p class=reason>{html.escape(s['reason'])}</p>")
         if s["status"] in NEXT:

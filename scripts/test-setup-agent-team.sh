@@ -68,10 +68,12 @@ grep -q 'vcs=p4' <<<"$p4_dry" || fail "p4 dry run did not name the vcs"
 defaults="$(python3 -I -c 'import sys; sys.path.insert(0, sys.argv[1]); import teamcfg
 c = teamcfg.load(sys.argv[2]); R = c["routing"]
 print(len(R["domains"]), len(R["domain"]), *c["locks"]["names"], *c["locks"]["default"], len(c["heuristic"]["rules"]),
-      all(a in c["agent_defs"] for a in ("designer", "gameplay", "engine", "tools", "technical_artist", "audio", "qa", "build_release")),
-      all(s in teamcfg.list_skills(c) for s in ("shaders", "animation", "level-design", "balancing", "netcode", "optimization")))' \
+      all(a in c["agent_defs"] for a in ("designer", "gameplay", "engine", "tools", "technical_artist", "audio", "qa", "build_release",
+                                          "narrative", "vfx", "ui")),
+      all(s in teamcfg.list_skills(c) for s in ("shaders", "animation", "level-design", "balancing", "netcode", "optimization",
+                                                "gameplay-systems", "rendering", "vfx", "localization", "qa-test-planning")))' \
   "$repo_root/agent-team" "$tmp/repo-p4/team.toml")" || fail "game-dev defaults do not load"
-[[ "$defaults" == "7 7 editor gpu build editor 3 True True" ]] || fail "game-dev defaults: $defaults"
+[[ "$defaults" == "7 7 editor gpu build editor 4 True True" ]] || fail "game-dev defaults: $defaults"
 
 # No VCS: kind none, no guard, no deny rules, and no git exclude entry even inside a git repository.
 git init -q "$tmp/repo-none"

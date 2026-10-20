@@ -24,7 +24,8 @@ spec = importlib.util.spec_from_loader("team_gamedev", importlib.machinery.Sourc
 team = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(team)
 
-DISCIPLINES = ("designer", "gameplay", "engine", "tools", "technical_artist", "audio", "qa", "build_release")
+DISCIPLINES = ("designer", "gameplay", "engine", "tools", "technical_artist", "audio", "qa", "build_release", "narrative", "vfx",
+               "ui")
 DOMAINS = ("gameplay", "engine", "tools", "technical_art", "audio", "design", "build")
 SKILLS = ("shaders", "animation", "level-design", "balancing", "netcode", "optimization")
 STAGES = ("plan", "plan_review", "implement", "review")
@@ -84,7 +85,7 @@ class Shipped(unittest.TestCase):
         self.assertEqual(cfg["locks"]["gpu"]["skip_if_holds"], "editor")
         h = cfg["heuristic"]
         self.assertEqual([t["name"] for t in h["tiers"]], ["low", "mid", "high", "top", "apex"])
-        self.assertEqual([r["name"] for r in h["rules"]], ["hard-route", "high-risk", "repeat-failures"])
+        self.assertEqual([r["name"] for r in h["rules"]], ["hard-route", "high-risk", "bundled-implementer", "repeat-failures"])
 
     def test_rules_resolve_to_a_tier(self):
         base = dict(route="simple", domain="gameplay", risk="low", size="small", stage="implement", failures=0, usage=None)
@@ -122,7 +123,7 @@ class Validation(unittest.TestCase):
             load(text.replace(old, new, 1))
 
     def test_side_task_role_must_be_an_agent(self):
-        self.check('"qa", "build_release"]', '"qa", "nobody"]', "side_task_roles references unknown agent 'nobody'")
+        self.check('"vfx", "ui"]', '"vfx", "nobody"]', "side_task_roles references unknown agent 'nobody'")
 
     def test_side_task_domain_keys_and_values(self):
         self.check('audio = "audio"\n', 'nobody = "audio"\n', "side_task_domains references unknown agent 'nobody'")
@@ -237,6 +238,53 @@ class Skills(unittest.TestCase):
     def test_skill_refs_attach_by_stage(self):
         refs = teamcfg.parse_skill_refs("shaders@implement, optimization, netcode@review")
         self.assertEqual(refs, [("shaders", "implement"), ("optimization", ""), ("netcode", "review")])
+
+
+class BlenderSkills(unittest.TestCase):
+    """The four blender-* DCC skills: files exist with unique names, wired into technical_artist and vfx, listed in the
+    index and the role doc, researched in docs/BLENDER_SKILLS.md, small enough to stay readable on demand."""
+    WIRING = {"blender-geometry-nodes": {"technical_artist", "vfx"}, "blender-rigging": {"technical_artist"},
+              "blender-animation": {"technical_artist"}, "blender-vfx": {"technical_artist", "vfx"}}
+
+    def test_files_exist_and_names_unique(self):
+        skills = ROOT / "templates/skills"
+        for name in self.WIRING:
+            self.assertTrue((skills / f"{name}.md").is_file(), name)
+        stems = [p.stem.lower() for p in skills.glob("*.md")]
+        self.assertEqual(len(stems), len(set(stems)))
+        titles = [(skills / f"{n}.md").read_text().splitlines()[0] for n in self.WIRING]
+        self.assertEqual(len(set(titles)), len(titles))
+
+    def test_wired_into_agents_and_index(self):
+        agents = teamcfg.load(ROOT / "templates/team.toml")["agent_defs"]
+        index = (ROOT / "templates/skills/INDEX.md").read_text()
+        roles = (ROOT.parent / "docs/GAME_DEV_ROLES.md").read_text()
+        for name, want in self.WIRING.items():
+            with self.subTest(name):
+                held = {a for a, d in agents.items() if name in {k["name"] for k in d.get("skills", [])}}
+                self.assertEqual(held, want)
+                self.assertIn(f"| `{name}` |", index)
+                self.assertIn(f"`{name}`", roles)
+
+    def test_version_aware_and_engine_ready(self):
+        for name in self.WIRING:
+            text = (ROOT / f"templates/skills/{name}.md").read_text()
+            with self.subTest(name):
+                self.assertIn("5.2", text, "names the Blender release it was checked against")
+                self.assertIn("```python", text.split("## Method", 1)[1].split("\n## ", 1)[0])
+                self.assertIn("blender -b", text)
+                notes = text.split("## Engine notes", 1)[1]
+                self.assertLess(notes.index("Unreal"), notes.index("Unity"))
+                self.assertLessEqual(len(text.split()), 1800)
+
+    def test_research_doc(self):
+        doc = (ROOT.parent / "docs/BLENDER_SKILLS.md").read_text()
+        for section in ("## Sources", "## Caveats"):
+            self.assertIn(section, doc)
+        self.assertIn("5.2", doc)
+        self.assertIn("docs.blender.org", doc.split("## Sources", 1)[1])
+        for name in self.WIRING:
+            self.assertIn(f"`{name}`", doc)
 
 
 if __name__ == "__main__":

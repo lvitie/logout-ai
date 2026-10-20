@@ -63,7 +63,10 @@ Read only the documents needed for the task:
 - `docs/SKILLS.md` when creating or changing skills.
 - `docs/WORKFLOW.md` when changing the repository development workflow.
 - `docs/AGENT_TEAM.md` when changing or installing the `agent-team/` multi-agent coordinator.
+- `docs/TOKEN_EFFICIENCY.md` when changing prompts, `common.md`, stage output caps, or Claude launch flags (token use).
 - `docs/MODEL_LADDER.md` when changing the model/effort ladder in the presets.
+- `docs/GAME_DEV_ROLES.md` when changing the bundled game-dev skills or discipline agents.
+- `docs/BLENDER_SKILLS.md` when changing the `blender-*` skills.
 - `docs/SECURITY_CONTROLS.md` when verifying GitHub security controls and recording evidence.
 - `docs/E2E_SMOKE.md` when running the real Claude/Codex smoke test or `team-setup` interactively.
 

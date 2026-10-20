@@ -120,7 +120,7 @@ def stage_info(s, now):
         kind, planned = "route", "producer"
     else:
         try:
-            stages = team.pipeline(s["route"], s["domain"])
+            stages = team.pipeline(s["route"], s["domain"], s.get("no_skip"))
         except Exception:
             stages = []
         if s["stage"] >= len(stages):
@@ -236,7 +236,8 @@ def frame(now, width, height, pending=None, err=None, running_ids=None):
         res = ",".join(s["res"])
         times = f"{dur(now - s['stage_started']) if s.get('stage_started') else '-'}/" \
                 f"{dur(now - s['created']) if s.get('created') else '-'}"
-        starting = "" if actual else f" {D}(starting){X}"
+        starting = ("" if actual else f" {D}(starting){X}") + \
+            (f" {D}skipped:{','.join(team.skipped_kinds(s))}{X}" if kind != "route" and team.skipped_kinds(s) else "")
         if width < 100:  # narrow pane: stage and role first, title last
             rows.append(f" {C}{B}{s['id']:<5}{X} {kind[:11]:<11} {B}{swap}{X} {rnd} {times} {s['change']} {Y}{res}{X}"
                         f" {D}{model}/{effort}{X}{starting} {s['title']}")
@@ -263,7 +264,9 @@ def frame(now, width, height, pending=None, err=None, running_ids=None):
             + [f"{B}RESOURCES{X} {res_cells}"]
             + [f"{B}NEEDS YOU{X}" + na + ("" if att else f"  {D}none{X}")] + att
             + [f"{B}QUEUE{X}" + ("" if que else f"  {D}empty{X}")] + que
-            + [f"{B}DONE today{X}" + ("" if dn else f"  {D}none{X}")] + dn)
+            + [f"{B}DONE today{X}" + ("" if dn else f"  {D}none{X}")] + dn
+            + ([f"{B}ROUTES{X} {D}(tokens, wall, first-pass per route){X}"] + [f" {D}{ln}{X}" for ln in CACHE.get("metrics", ())]
+               if CACHE.get("metrics") else []))
     if len(full) > height:  # first drop the per-task agent lines
         full = [ln for ln in full if ln not in logs]
     if len(full) > height:
@@ -288,6 +291,10 @@ def refresher():
             CACHE["pending"], CACHE["err"] = team.VCS.pending_changes(), None
         except Exception as e:  # never let the thread die silently
             CACHE["pending"], CACHE["err"] = None, f"{type(e).__name__} {str(e)[:40]}"
+        try:  # per-route metrics read every stage log: refreshed here, not on each redraw
+            CACHE["metrics"] = team.metrics_lines()
+        except Exception:
+            CACHE["metrics"] = []
         time.sleep(30)
 
 

@@ -19,6 +19,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 import teamcfg  # noqa: E402
+import tokens  # noqa: E402
 import vcs as vcsmod  # noqa: E402
 
 CLIP = 6000  # max chars of any hand-off inlined into a prompt
@@ -127,28 +128,54 @@ def fmt(text):
             .replace("{state_dir}", CFG["project"]["state_dir"]))
 
 
-def pipeline(route, domain):
+def is_impl(kind):
+    """True for the stages that change files: implement and plan_implement."""
+    return teamcfg.norm_kind(kind) == "implement"
+
+
+def kinds_of(stages):
+    """Stage kinds a pipeline runs; plan_implement counts as both plan and implement."""
+    ks = {k for k, *_ in stages}
+    return ks | ({"plan", "implement"} if "plan_implement" in ks else set())
+
+
+def _entries(route, domain, no_skip=False):
+    """[(kind, agent, profile role)] of a route for a domain: domain agents applied, skipped stages dropped (never
+    review; no_skip, set when a failed review upgraded the task, keeps them), the extra review appended."""
     R = CFG["routing"]
     if route and route.startswith("custom:"):  # parallel side task: one named role implements, a reviewer checks
-        return [("implement", route.split(":", 1)[1]), ("review", R["side_task_reviewer"])]
-    stages = [tuple(x) for x in R["pipeline"][route if route in R["pipeline"] else "hard"]]
+        return [("implement", route.split(":", 1)[1], "mid"), ("review", R["side_task_reviewer"], R["side_task_reviewer"])]
+    skip = frozenset() if no_skip else teamcfg.skip_set(CFG, route, domain)
     over = R["domain"].get(domain, {})  # [routing.domain.<name>]: agent per stage kind; unset = the route's role
-    stages = [(k, over.get(k, r)) for k, r in stages]
+    out = []
+    for k, r in R["pipeline"][route if route in R["pipeline"] else "hard"]:
+        if k not in skip:
+            out.append((k, over.get("implement" if k == "plan_implement" else k, r), r))
     if R["extra_review_role"] and (route in R["extra_review_routes"] or domain in R["review_extra_domains"]):
-        stages.append(("review", R["extra_review_role"]))
-    return stages
+        out.append(("review", R["extra_review_role"], R["extra_review_role"]))
+    return out
 
 
-def stage_profile(route, domain, i):
+def pipeline(route, domain, no_skip=False):
+    return [(k, a) for k, a, _ in _entries(route, domain, no_skip)]
+
+
+def task_stages(s):
+    return pipeline(s["route"], s["domain"], s.get("no_skip"))
+
+
+def skipped_kinds(s):
+    """Stage kinds of the full cycle (plan, plan_review, implement, review) this task's route does not run."""
+    if not s.get("route") or s["route"].startswith("custom:"):
+        return []
+    have = kinds_of(task_stages(s))
+    return [k for k in teamcfg.DOMAIN_STAGES if k not in have]
+
+
+def stage_profile(route, domain, i, no_skip=False):
     """The [roles] entry (cli, model, effort) stage i starts on: its agent's own, else the route's role for that stage."""
-    agent = pipeline(route, domain)[i][1]
-    if agent in ROLES:
-        return agent
-    R = CFG["routing"]
-    if route and route.startswith("custom:"):
-        return R["side_task_reviewer"] if i else "mid"
-    base = R["pipeline"][route if route in R["pipeline"] else "hard"]
-    return base[i][1] if i < len(base) else R["extra_review_role"]
+    _, agent, role = _entries(route, domain, no_skip)[i]
+    return agent if agent in ROLES else role
 
 
 def hist_entries(s):
@@ -302,7 +329,7 @@ def stage_skills(s, kind):
         return []
     out = {}
     for k in s.get("skills", []):
-        if k["stage"] in ("", kind) and k["name"] not in out:
+        if k["stage"] in ("", kind, *(("plan", "implement") if kind == "plan_implement" else ())) and k["name"] not in out:
             out[k["name"]] = teamcfg.load_skill(CFG, k["name"])
     return list(out.items())
 
@@ -317,8 +344,25 @@ def attach_skills(s, refs, who, pl=None):
         s["skills"].append({"name": name, "stage": stage})
         if len(teamcfg.load_skill(CFG, name)) > CLIP:
             live(f"[{s['id']}] warning: skill {name} is over {CLIP} chars")
-        if stage and pl is not None and stage not in {k for k, _ in pl}:
+        if stage and pl is not None and stage not in kinds_of(pl):
             live(f"[{s['id']}] warning: skill {name}@{stage} ({who}) never runs: no {stage} stage in this pipeline")
+
+
+def diff_summary(path, limit=40):
+    """'- file +added -removed' per file of a git or p4 diff, so a reviewer reads the right hunks (not all of changes.diff)."""
+    try:
+        text = Path(path).read_text(errors="replace")
+    except OSError:
+        return ""
+    files, cur = {}, None
+    for line in text.splitlines():
+        m = re.match(r"diff --git a/(.+?) b/|==== (\S+?)(?:#\d+)? - |^Index: (.+)$", line)
+        if m:
+            cur = files.setdefault(next(g for g in m.groups() if g), [0, 0])
+        elif cur is not None and line[:1] in "+-" and line[:3] not in ("+++", "---"):
+            cur[line[0] == "-"] += 1
+    rows = [f"- {f} +{a} -{d}" for f, (a, d) in list(files.items())[:limit]]
+    return "\n".join(rows + ([f"- ... {len(files) - limit} more"] if len(files) > limit else []))
 
 
 def build_prompt(s, kind, agent, skills=()):
@@ -333,15 +377,17 @@ def build_prompt(s, kind, agent, skills=()):
     parts = [p for p in parts if p]
     parts += [f"## Skill: {n}\n{x}" for n, x in dict(skills).items()]
     for label, key in (("Spec", "spec"), ("Plan", "plan"), ("Report", "report")):
-        if s.get(key) and kind != "route":
+        if s.get(key) and kind != "route" and not (key == "plan" and s.get("plan") == s.get("report")):  # plan_implement: one handoff
             parts.append(f"## {label}\n" + body(Path(s[key]).read_text()))
-    feedback = s["plan_reviews"] if kind in ("plan", "plan_review") else s["reviews"]
+    if kind == "review" and (summary := diff_summary(d / "changes.diff")):
+        parts.append(f"## Changed files ({d / 'changes.diff'})\n" + summary)
+    feedback = s["plan_reviews"] + (s["reviews"] if kind == "plan" else []) if kind in ("plan", "plan_review") else s["reviews"]
     if kind != "route":
         parts += [f"## Earlier findings ({Path(r).stem})\n" + body(Path(r).read_text()) for r in feedback]
     if kind != "route" and s.get("diagnose") == kind:
         parts.append("## Diagnosis required\nA reviewer rated the last failure critical or recommended escalation. Before "
                      "changing anything, state the root cause and why the earlier attempt missed it, then fix that.")
-    if kind != "implement" and CFG["prompts"]["readonly_note"]:
+    if not is_impl(kind) and CFG["prompts"]["readonly_note"]:
         parts.append(CFG["prompts"]["readonly_note"])
     if s["notes"]:
         parts.append("## User notes\n" + "\n".join(f"- {n}" for n in s["notes"]))
@@ -414,6 +460,11 @@ def agent_cmd(cli, model, effort, readonly, out):
                "--settings", json.dumps(settings)]
         if readonly:
             cmd += ["--tools", "Read,Glob,Grep"]
+        # user MCP servers and plugin skills are re-sent every turn (82k vs 6k tokens on a read-only stage): skip them
+        if CFG["agents"]["mcp"] == "none" or (readonly and CFG["agents"]["mcp"] == "write"):
+            cmd += ["--strict-mcp-config"]
+        if not CFG["agents"]["user_skills"]:
+            cmd += ["--disable-slash-commands"]
         return cmd
     cmd = ["codex", "exec", "-m", model, "-c", f'model_reasoning_effort="{effort}"', "-C", str(WS),
            "--skip-git-repo-check", "--json", "-o", str(out)]  # Perforce and other non-git workspaces
@@ -683,7 +734,7 @@ def _reassign(s, kind, agent, role):
             live(f"[{s['id']}] Override: {role} -> {ov[kind]}")
             agent = role = ov[kind]
             forced = True
-        if kind == "implement" and ov.get("implement") in ROLES and s["review_rounds"] >= ov.get("after_failed_reviews", 1):
+        if is_impl(kind) and ov.get("implement") in ROLES and s["review_rounds"] >= ov.get("after_failed_reviews", 1):
             live(f"[{s['id']}] Override after failed review: {role} -> {ov['implement']}")
             agent = role = ov["implement"]
             forced = True
@@ -761,7 +812,7 @@ def _select_tiered(s, kind, agent, profile, h):
     notes = []
     if state is None and any("usage" in r["when"] for r in h["rules"]):
         notes.append(f"usage ignored: {why}")
-    floor = max([e["rank"] for e in s.get("stepped", []) if e["kind"] == kind and e["rank"] < len(h["tiers"])], default=None)
+    floor = max([e["rank"] for e in s.get("stepped", []) if teamcfg.norm_kind(e["kind"]) == teamcfg.norm_kind(kind) and e["rank"] < len(h["tiers"])], default=None)
     if floor is not None and floor > res["rank"]:  # an escalation step (see escalate) raises the tier
         res = {**res, "rank": floor, "tier": h["tiers"][floor]["name"], "decided_by": "step-up"}
         notes.append(f"step-up: {kind} retried at tier {res['tier']}")
@@ -840,7 +891,7 @@ def _run_agent_once(s, kind, agent, role, burst, ctx=None):
             env[f"TEAM_REAL_{tool.upper()}"] = real
         else:
             env.pop(f"TEAM_REAL_{tool.upper()}", None)
-    cmd = teamcfg.command(agent_cmd(cli, model, effort, kind != "implement", out), path=env["PATH"])
+    cmd = teamcfg.command(agent_cmd(cli, model, effort, not is_impl(kind), out), path=env["PATH"])
 
     if ctx:
         r = ctx["record"]
@@ -871,7 +922,7 @@ def _run_agent_once(s, kind, agent, role, burst, ctx=None):
                     live(f"[{name}] {msg[:600]}")
                 if result is not None:
                     final = result
-                if cli == "codex" and kind == "implement" and isinstance(ev, dict):
+                if cli == "codex" and is_impl(kind) and isinstance(ev, dict):
                     untracked += track_codex_edits(s, ev)
                 if timer is None and (result is not None or (isinstance(ev, dict) and ev.get("type") == "turn.completed")):
                     # the last event: reap stray background shells that hold stdout open
@@ -929,6 +980,8 @@ def route_task(s):
     _, title = tag(text, "TITLE")
     set_risk_size(s, tag(text, "RISK")[0], tag(text, "SIZE")[0])
     s["title"] = title or s["request"].splitlines()[0][:60]
+    route = teamcfg.canon_route(route)
+    route = lighter_guard(s, route)
     if route in ROUTES and domain in DOMAINS:
         suggest_skills(s, text, route, domain)
     VCS.set_description(s["change"], f"[team {s['id']}] {s['title']}")
@@ -938,7 +991,30 @@ def route_task(s):
         s["status"], s["reason"] = "failed", f"Producer gave ROUTE={route} DOMAIN={domain}"
     else:
         s["route"], s["domain"], s["stage"] = route, domain, 0
-        live(f"[{s['id']}] routed {route}/{domain}: {s['title']}")
+        s.setdefault("route_initial", route)
+        s["skipped"] = skipped_kinds(s)
+        live(f"[{s['id']}] routed {route}/{domain}: {s['title']}" + (f" (skipped: {', '.join(s['skipped'])})" if s["skipped"] else ""))
+
+
+def lighter_guard(s, route):
+    """The Producer's route, or the `team new --route` one, raised when a lighter route is unsafe: high risk or earlier
+    failed attempts -> complex; a lighter forced route over a hard verdict stays hard. ask is never changed."""
+    forced = teamcfg.canon_route(s.get("route_forced") or "")
+    if forced in ROUTES and route != "ask":
+        if route == "hard" and forced in teamcfg.LIGHT_ROUTES:
+            s["notes"].append(f"Route {forced} refused: the Producer rated the task hard.")
+            live(f"[{s['id']}] route {forced} refused, kept hard")
+        else:
+            route = forced
+    if route not in teamcfg.LIGHT_ROUTES:
+        return route
+    why = ("high risk" if s.get("risk") == "high" else
+           "earlier failed attempts" if s.get("impl_fails") or s.get("plan_rounds") or s.get("no_skip") else "")
+    if why:
+        live(f"[{s['id']}] route {route} raised to complex: {why}")
+        s["notes"].append(f"Route {route} raised to complex: {why}.")
+        return "complex"
+    return route
 
 
 def set_risk_size(s, risk, size):
@@ -973,16 +1049,19 @@ def suggest_skills(s, text, route, domain):
 
 def step(s, stages):
     kind, agent = stages[s["stage"]]
-    profile = stage_profile(s["route"], s["domain"], s["stage"])
+    profile = stage_profile(s["route"], s["domain"], s["stage"], s.get("no_skip"))
     tk = CFG["routing"]["takeover"].get(agent)  # [routing.takeover.<role>]: optional explicit `to` agent
-    if kind == "implement" and tk and tk.get("to") and takeover_due(s, agent, tk):
+    if is_impl(kind) and tk and tk.get("to") and takeover_due(s, agent, tk):
         agent = profile = tk["to"]
     out, text, agent, role = run_agent(s, kind, agent, profile)
     if not out:
         return
     who = ROLES[agent][0] if agent in ROLES else agent
-    if kind in ("plan", "implement"):
-        s["plan" if kind == "plan" else "report"] = out
+    if kind in ("plan", "implement", "plan_implement"):
+        if kind != "implement":  # plan_implement: the plan is the first section of its report
+            s["plan"] = out
+        if kind != "plan":
+            s["report"] = out
         status, reason = tag(text, "STATUS")
         if status == "done":
             s["stage"] += 1
@@ -997,6 +1076,9 @@ def step(s, stages):
     esc = esc == "yes"
     feedback = "plan_reviews" if kind == "plan_review" else "reviews"
     rounds, target = ("plan_rounds", "plan") if kind == "plan_review" else ("review_rounds", "implement")
+    if kind == "review" and verdict in ("pass", "fail"):
+        s["review_rounds_total"] = s.get("review_rounds_total", 0) + 1
+        s.setdefault("first_pass", verdict == "pass" and not esc)  # decided once, by the first review verdict
     if verdict == "pass" and not esc:
         if s.get("diagnose") == target:
             s.pop("diagnose")
@@ -1011,7 +1093,9 @@ def step(s, stages):
     s[rounds] += 1
     if kind != "plan_review":
         s["impl_fails"] = s.get("impl_fails", 0) + 1  # cumulative, survives escalation retries
-    ti = next(i for i, (k, _) in enumerate(stages) if k == target)
+    if kind == "review" and upgrade(s, out, sev, esc, esc_why):
+        return
+    ti = next(i for i, (k, _) in enumerate(stages) if teamcfg.norm_kind(k) == target)
     severe = esc or sev in ("major", "critical")  # minor: no step
     reasons = ([f"severity {sev}"] if sev != "minor" else []) + ([f"recommended: {esc_why}"] if esc else [])
     if target == "implement":
@@ -1023,6 +1107,7 @@ def step(s, stages):
         s.pop("capped", None)  # only a refused severe step marks the cap for `team approve`
     if severe and refused:  # a major failure that cannot step up goes to the user
         s["failed"] = True
+        s["escalations"] = s.get("escalations", 0) + 1
         s["status"], s["reason"] = "escalated", f"{target} failed review ({sev}{', escalation recommended' if esc else ''}): {refused}; see {out}"
         return
     if not severe:
@@ -1030,6 +1115,7 @@ def step(s, stages):
         n[target] = n.get(target, 0) + 1
         if n[target] > MAX_ROUNDS:
             s["failed"] = True
+            s["escalations"] = s.get("escalations", 0) + 1
             s["status"], s["reason"] = "escalated", f"{target} failed review {n[target]} times (minor); see {out}"
             return
     s["stage"] = ti
@@ -1039,10 +1125,37 @@ def step(s, stages):
 SEVERITIES = ("minor", "major", "critical")
 
 
+def upgrade(s, out, sev, esc, esc_why):
+    """A failed review on a route that skipped its plan retries on a fuller pipeline: direct/bundled -> planned,
+    planned -> complex, a configured skip -> dropped (no_skip). The retry restarts at the plan stage with the review
+    findings. It counts as a heuristic failure (see _select_tiered) and as an upgrade in the route metrics. Returns
+    True when it took over the retry. hard, custom and legacy simple routes never upgrade."""
+    route = s["route"]  # a stored legacy "simple" keeps its old behaviour: only the new route names upgrade
+    new = teamcfg.UPGRADE.get(route)
+    if not new and (s.get("no_skip") or not teamcfg.skip_set(CFG, route, s["domain"])):
+        return False
+    old = stage_label(s)
+    s["no_skip"] = True
+    if new:
+        s["route"] = new
+    for e in s.get("stepped", []):
+        e["kind"] = teamcfg.norm_kind(e["kind"])
+    stages = task_stages(s)
+    s["stage"] = next(i for i, (k, _) in enumerate(stages) if k == "plan")
+    s["upgrades"] = s.get("upgrades", 0) + 1
+    s["skipped"] = skipped_kinds(s)
+    s.pop("capped", None)
+    if esc or sev == "critical":
+        s["diagnose"] = "plan"
+    live(f"[{s['id']}] review failed ({sev}) on a skipped-plan route: upgraded {route} -> {s['route']}, "
+         f"back to plan (was {old}); findings {out}")
+    return True
+
+
 def takeover_due(s, agent, tk):
     """[routing.takeover.<role>]: the failed-review or first-attempt condition."""
     return s["review_rounds"] >= tk.get("after_reviews", 1) or bool(
-        tk.get("after_attempt") and ("implement", agent) in [e[:2] for e in hist_entries(s)])
+        tk.get("after_attempt") and ("implement", agent) in [(teamcfg.norm_kind(e[0]), e[1]) for e in hist_entries(s)])
 
 
 def count_triggers(s, agent):
@@ -1051,7 +1164,7 @@ def count_triggers(s, agent):
     R, out = CFG["routing"], []
     tk = R["takeover"].get(agent)
     if tk and not tk.get("to") and takeover_due(s, agent, tk) \
-            and not any("takeover" in e["rules"] for e in s.get("stepped", []) if e["kind"] == "implement"):
+            and not any("takeover" in e["rules"] for e in s.get("stepped", []) if teamcfg.norm_kind(e["kind"]) == "implement"):
         out.append("takeover")
     af = R["after_impl_fails"]
     if af and s.get("impl_fails", 0) == af["fails"]:
@@ -1064,7 +1177,8 @@ def escalate(s, stages, ti, reasons):
     cannot (no ladder, a pin or role_override, already at the strongest tier), else None."""
     kind, agent = stages[ti]
     h = s.get("heuristic")
-    last = next((x for x in reversed(s.get("launches", [])) if (x.get("heuristic") or {}).get("kind") == kind), None)
+    last = next((x for x in reversed(s.get("launches", []))
+                 if teamcfg.norm_kind((x.get("heuristic") or {}).get("kind")) == teamcfg.norm_kind(kind)), None)
     rank = ((last or {}).get("heuristic") or {}).get("rank")
     if not h or rank is None:
         return "no tier ladder applies (no [heuristic], a pinned agent or a role_override)"
@@ -1072,6 +1186,7 @@ def escalate(s, stages, ti, reasons):
         s["capped"] = kind  # `team approve` retries here at the cap
         return f"already at the strongest tier ({h['tiers'][rank]['name']})"
     s.setdefault("stepped", []).append({"kind": kind, "agent": agent, "rank": rank + 1, "rules": reasons})
+    s["escalations"] = s.get("escalations", 0) + 1
     live(f"[{s['id']}] escalation ({', '.join(reasons)}): {kind} retries at tier {h['tiers'][rank + 1]['name']}")
     return None
 
@@ -1154,11 +1269,12 @@ def advance(s, from_queue=False):
             if s["stage"] < 0:
                 route_task(s)
             else:
-                stages = pipeline(s["route"], s["domain"])
+                stages = task_stages(s)
                 if s["stage"] >= len(stages):
                     s["status"], s["reason"] = "done", (f"Review {noun()} {s['change']} (`team review {s['id']}`); the user submits it." if VCS.submit_step
                                                          else f"Review the {noun()} (`team review {s['id']}`).")
                     s["finished"] = time.time()
+                    s.setdefault("first_finish", s["finished"])  # `finished` moves on a redo; this one does not
                 else:
                     step(s, stages)
             if s["status"] == "running" and s["stage"] != previous_stage and stage_label(s) != "end":
@@ -1691,7 +1807,7 @@ def cmd_queue(a):
 def stage_label(s):
     if s["stage"] < 0:
         return "route/producer"
-    stages = pipeline(s["route"], s["domain"])
+    stages = task_stages(s)
     return "end" if s["stage"] >= len(stages) else "/".join(stages[s["stage"]])
 
 
@@ -1704,12 +1820,15 @@ def cmd_new(a):
             teamcfg.load_skill(CFG, name)
     except ValueError as e:
         sys.exit(f"--skill: {e}")
-    s = create_task(a.request, a.res, a.role, skills=refs, risk=getattr(a, "risk", None), size=getattr(a, "size", None))
+    if getattr(a, "route", None) and a.role:
+        sys.exit("--route and --role cannot be combined: a side task skips routing.")
+    s = create_task(a.request, a.res, a.role, skills=refs, risk=getattr(a, "risk", None), size=getattr(a, "size", None),
+                    route=getattr(a, "route", None))
     if not a.no_run:
         advance(s)
 
 
-def create_task(request, res_arg="", role=None, queued=False, skills=(), risk=None, size=None):
+def create_task(request, res_arg="", role=None, queued=False, skills=(), risk=None, size=None, route=None):
     """A new task folder, change and state; queued ones are started by the queue runner."""
     RUNS.mkdir(parents=True, exist_ok=True)
     n = max([int(p.name[1:]) for p in RUNS.glob("t[0-9]*") if p.name[1:].isdigit()] + [0]) + 1
@@ -1732,8 +1851,10 @@ def create_task(request, res_arg="", role=None, queued=False, skills=(), risk=No
          "stage": -1, "status": "new", "reason": "", "n": 0, "plan_rounds": 0, "review_rounds": 0,
          "res": res, "notes": [], "plan_reviews": [], "reviews": [], "history": [],
          "created": time.time(), "stage_started": None, "finished": None}
+    if route:  # the Producer still writes the spec; this route replaces its pick (see lighter_guard)
+        s["route_forced"] = teamcfg.canon_route(route)
     if role:  # parallel side task: skip routing, the named role implements
-        s.update(route=f"custom:{role}", stage=0, title=request.splitlines()[0][:60],
+        s.update(route=f"custom:{role}", route_initial="custom", skipped=[], stage=0, title=request.splitlines()[0][:60],
                  domain=CFG["routing"]["side_task_domains"].get(role, CFG["routing"]["domains"][0]))
     if risk:
         s["risk"] = risk
@@ -1772,11 +1893,11 @@ def cmd_approve(a):
     if s["status"] == "escalated":
         s["plan_rounds"] = s["review_rounds"] = 0
         reset_escalation(s)
-        stages = pipeline(s["route"], s["domain"])
+        stages = task_stages(s)
         kind = stages[s["stage"]][0] if 0 <= s["stage"] < len(stages) else None
         if kind in ("plan", "plan_review", "review"):  # retry the work that failed review, not the review
             target = "plan" if kind != "review" else "implement"
-            s["stage"] = next(i for i, (k, _) in enumerate(stages) if k == target)
+            s["stage"] = next(i for i, (k, _) in enumerate(stages) if teamcfg.norm_kind(k) == target)
     advance(s)
 
 
@@ -1800,7 +1921,7 @@ def cmd_redo(a):
     s.pop("capped", None)  # redo starts below the cap, unlike approve
     reset_escalation(s)
     s["stage"] = -1 if not s["route"] else next(
-        i for i, (k, _) in enumerate(pipeline(s["route"], s["domain"])) if k == "implement")
+        i for i, (k, _) in enumerate(task_stages(s)) if is_impl(k))
     advance(s)
 
 
@@ -1824,11 +1945,83 @@ def under_watch():
     return False
 
 
+def task_tokens(tid):
+    """'in 1.2M (cache 95%) out 12k $1.23' for a task's stage logs, or ''."""
+    rows = tokens.collect(RUNS, {tid})
+    if not rows:
+        return ""
+    return (f"{len(rows)} runs, in {tokens.human(sum(map(tokens.total, rows)))} (cache {tokens.hit(rows) * 100:.0f}%) "
+            f"out {tokens.human(sum(r['out'] for r in rows))} ${sum(r['cost'] or 0 for r in rows):.2f}")
+
+
+def cmd_tokens(a):
+    print("\n".join(tokens.report(RUNS, set(a.ids) or None, a.runs)))
+
+
+def route_metrics(tids=None):
+    """Per route (route_initial, aliases merged): tasks, done, tokens (in+out, from the stage logs), mean wall seconds
+    of done tasks (created -> first finish), first-pass review pass rate, review rounds (all review verdicts), upgrades
+    to a fuller pipeline, escalations (tier step-ups and hand-offs to the user) and skipped stage runs. The counters in
+    state.json are cumulative: neither redo nor approve resets them."""
+    rows = {}
+    for r in tokens.collect(RUNS):
+        rows.setdefault(r["task"], []).append(r)
+    out = {}
+    for d in sorted(RUNS.glob("t[0-9]*")):
+        try:
+            s = json.loads((d / "state.json").read_text())
+            assert isinstance(s, dict) and "id" in s
+        except (OSError, ValueError, AssertionError):
+            continue
+        if tids and s["id"] not in tids:
+            continue
+        key = teamcfg.canon_route(s.get("route_initial") or s.get("route") or "unrouted")
+        key = "custom" if key.startswith("custom") else key
+        m = out.setdefault(key, dict(tasks=0, done=0, tokens=0, wall=[], first_pass=[], rounds=0, upgrades=0, escalations=0,
+                                     skipped=0))
+        m["tasks"] += 1
+        m["done"] += s["status"] == "done"
+        m["tokens"] += sum(tokens.total(r) + r["out"] for r in rows.get(s["id"], ()))
+        end = s.get("first_finish") or (s.get("finished") if s["status"] == "done" else None)
+        if end and s.get("created"):
+            m["wall"].append(end - s["created"])
+        if "first_pass" in s:
+            m["first_pass"].append(bool(s["first_pass"]))
+        m["rounds"] += s.get("review_rounds_total", 0)
+        m["upgrades"] += s.get("upgrades", 0)
+        m["escalations"] += s.get("escalations", 0)
+        m["skipped"] += len(s.get("skipped") or ())
+    for m in out.values():
+        m["wall"] = sum(m["wall"]) / len(m["wall"]) if m["wall"] else None
+        m["first_pass"] = sum(m["first_pass"]) / len(m["first_pass"]) if m["first_pass"] else None
+    return out
+
+
+def metrics_lines(tids=None):
+    """Text table of route_metrics for `team status --metrics`, the focus panel and the review page."""
+    ms = route_metrics(tids)
+    head = f"{'route':8} {'tasks':>5} {'done':>4} {'tok/task':>9} {'wall/task':>9} {'1st-pass':>8} {'rounds':>6} {'upgr':>4} {'esc':>3} {'skipped':>7}"
+    lines = [head]
+    for k, m in sorted(ms.items()):
+        wall = f"{m['wall'] / 60:.0f}m" if m["wall"] is not None else "-"
+        fp = f"{m['first_pass'] * 100:.0f}%" if m["first_pass"] is not None else "-"
+        lines.append(f"{k:8} {m['tasks']:5} {m['done']:4} {tokens.human(m['tokens'] / m['tasks']):>9} {wall:>9} {fp:>8} "
+                     f"{m['rounds']:6} {m['upgrades']:4} {m['escalations']:3} {m['skipped']:7}")
+    return lines if ms else []
+
+
 def cmd_status(a):
+    if getattr(a, "metrics", False):
+        print("\n".join(metrics_lines()) or "No tasks yet.")
+        return
     if a.id:
         s = load(a.id)
         print(f"{s['id']}  {s['status']}  chg:{s['change']}  {s['route']}/{s['domain']}  at {stage_label(s)}")
+        if sk := skipped_kinds(s):
+            print(f"  skipped: {', '.join(sk)}" + (f"  upgrades: {s['upgrades']}" if s.get("upgrades") else ""))
         print(f"  {format_task_timing(s)}  (c=created s=stage f=finished +stage elapsed)")
+        if used := task_tokens(s["id"]):
+            print(f"  tokens: {used}")
         print(f"  {s['title'] or s['request'].splitlines()[0]}")
         if s["reason"]:
             print(f"  {s['reason']}")
@@ -1874,6 +2067,8 @@ def main():
     p.add_argument("request")
     p.add_argument("--role", choices=CFG["routing"]["side_task_roles"] or None,
                    help="parallel side task: skip routing, this role implements, the side-task reviewer reviews")
+    p.add_argument("--route", choices=sorted(ROUTES), help="route override for the Producer's pick (high risk or "
+                   "earlier failures still raise a lighter route to complex)")
     p.add_argument("--risk", choices=teamcfg.RISKS, help="heuristic input for a side task (default: high)")
     p.add_argument("--size", choices=teamcfg.SIZES, help="heuristic input for a side task (default: large)")
     p.add_argument("--res", default="", help="locks used, comma list of [locks].names or none (default: [locks].default)")
@@ -1915,8 +2110,13 @@ def main():
     p = sub.add_parser("wait", help="block until a task needs attention or finishes, print it and exit")
     p.add_argument("--no-block", action="store_true", help="report what changed since the last wait and exit")
     p.set_defaults(func=cmd_wait)
+    p = sub.add_parser("tokens", help="tokens, cost and time per stage kind, agent and task (from the stage logs)")
+    p.add_argument("ids", nargs="*", help="task ids (default: all)")
+    p.add_argument("--runs", action="store_true", help="also list every stage run")
+    p.set_defaults(func=cmd_tokens)
     p = sub.add_parser("status", help="list tasks, or show one")
     p.add_argument("-r", "--reverse", action="store_true", help="newest task first")
+    p.add_argument("--metrics", action="store_true", help="per-route tokens, wall time, first-pass rate, rounds, upgrades")
     p.add_argument("id", nargs="?")
     p.set_defaults(func=cmd_status)
     a = ap.parse_args(rest)

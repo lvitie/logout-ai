@@ -23,6 +23,9 @@ p4 = { change = ["-d", "-f"], changelist = ["-d", "-f"] }
 
 [agents]
 deny_extra = ["chmod"]        # more Claude Bash(...) deny rules (git commands come from [vcs.deny])
+mcp = "write"                 # Claude runs: user MCP servers load in "all" stages, only "write" (implement) stages, or "none"; each
+                              # server's tools are re-sent every turn (read-only stage: ~82k tokens with them, ~6k without)
+user_skills = false           # true: also load the user's own Claude skills/slash commands (--disable-slash-commands otherwise)
 
 [locks]                       # resources a task may hold; same lock = exclusive, different locks run in parallel
 names = ["editor", "gpu", "build"]
@@ -111,7 +114,7 @@ review_extra_domains = ["technical_art", "audio"]  # domains that get one more r
 extra_review_routes = ["hard"]  # ... and routes that do
 extra_review_role = "director"
 side_task_reviewer = "architect"  # `team new --role X` skips routing; this role reviews
-side_task_roles = ["mid", "senior", "gameplay", "engine", "tools", "technical_artist", "audio", "designer", "qa", "build_release"]
+side_task_roles = ["mid", "senior", "gameplay", "engine", "tools", "technical_artist", "audio", "designer", "qa", "build_release", "narrative", "vfx", "ui"]
 capacity_fallback = {}        # role -> role to retry on when a model reports 503/at capacity
 # Per-domain stage agents: plan, plan_review, implement, review name agents (templates/agents files or [roles] keys).
 # Agents are discipline identity (prompt, scope); the model/effort of each stage comes from the route's role profile and
@@ -152,6 +155,10 @@ plan = "build_release"
 plan_review = "engine"
 implement = "build_release"
 review = "tools"
+# Skip defaults: [routing.skip] route = [stages] and `skip = [stages]` in a [routing.domain.<name>] table drop plan and/or
+# plan_review (plan implies plan_review) from non-hard routes. review cannot be skipped; hard never skips.
+# [routing.skip]
+# complex = ["plan_review"]
 [routing.side_task_domains]   # side-task role -> domain (default: first domain)
 technical_artist = "technical_art"
 audio = "audio"
@@ -160,8 +167,20 @@ engine = "engine"
 tools = "tools"
 build_release = "build"
 qa = "gameplay"
-[routing.pipeline]            # [stage kind, role] lists
-simple = [["implement", "mid"], ["review", "architect"]]
+narrative = "design"     # narrative, vfx and ui are side-task agents; no domain stage table uses them
+vfx = "technical_art"
+ui = "gameplay"
+# Adaptive pipeline: the Producer picks the lightest route that keeps the quality bar (jobs/route.md has the criteria).
+# direct (alias simple): implement, review. bundled: one agent plans then implements in one run (plan = first section
+# of its report), review. planned: plan, implement, review (no plan_review). complex/hard: the full cycle. bundled and
+# planned are derived from direct and complex unless defined below. The review gate is never skipped. A failed review on
+# a route without its plan retries one route up (direct/bundled -> planned -> complex) at the plan stage and counts as a
+# failure for [heuristic] failures_min. `team new --route X` overrides the pick; high risk or earlier failures raise
+# a lighter route to complex. `team status --metrics` reports tokens, wall time, first-pass rate, rounds, upgrades.
+[routing.pipeline]            # [stage kind, role] lists; plan_implement = plan + implement in one run
+direct = [["implement", "mid"], ["review", "architect"]]
+bundled = [["plan_implement", "mid"], ["review", "architect"]]
+planned = [["plan", "architect"], ["implement", "mid"], ["review", "architect"]]
 complex = [["plan", "architect"], ["plan_review", "director"], ["implement", "mid"], ["review", "architect"]]
 hard = [["plan", "director"], ["plan_review", "architect"], ["implement", "senior"], ["review", "architect"]]
 # Escalation: a reviewer's SEVERITY major/critical (or ESCALATE: yes) retries the same agent one tier up the
@@ -175,8 +194,8 @@ hard = [["plan", "director"], ["plan_review", "architect"], ["implement", "senio
 # Model/effort heuristic. Tiers are ranks, weakest first; each names a [roles] profile per cli. Rules run top
 # to bottom and set a minimum (tier and/or effort); the highest wins; the stage's own profile is a floor (at its rank it
 # runs unchanged), so a ladder without rules only acts on escalation. when keys: route
-# (simple|complex|hard|custom), domain, risk (low|medium|high), size (small|medium|large), stage (route|plan|
-# plan_review|implement|review), failures_min (rejected plans + implementations), usage (low|claude|codex|mixed; only
+# (direct|bundled|planned|complex|hard|custom; simple = direct), domain, risk (low|medium|high), size (small|medium|large), stage (route|plan|
+# plan_review|implement|plan_implement|review; a plan_implement run matches plan and implement rules), failures_min (rejected plans + implementations), usage (low|claude|codex|mixed; only
 # with fresh [routing.usage] data). A value may be a list. Agent frontmatter model/effort is a floor; `pin = true`
 # makes it exact. Each launch logs the rule in live.log and in state.json (launches[].heuristic).
 # Example rule: when = { risk = "high", size = ["medium", "large"] }, min = { tier = "high", effort = "high" }
@@ -196,6 +215,10 @@ min  = { tier = "high", effort = "high" }
 name = "high-risk"
 when = { risk = "high", size = ["medium", "large"], route = ["complex", "hard"] }
 min  = { tier = "high" }
+[[heuristic.rule]]
+name = "bundled-implementer"   # a bundled run plans and builds: at least the implementer tier when it is not trivial
+when = { route = "bundled", risk = ["medium", "high"] }
+min  = { tier = "mid" }
 [[heuristic.rule]]
 name = "repeat-failures"
 when = { failures_min = 2 }

@@ -150,8 +150,8 @@ class Skills(unittest.TestCase):
     def test_route_parses_skills(self):
         self.skill("custom", "# C\nc")
         s = self.route("spec\nSKILLS: `tdd`, custom@review nope perf-capture@route custom@review.\n"
-                       "TITLE: t\nROUTE: simple\nDOMAIN: code\n")
-        self.assertEqual(s["route"], "simple")
+                       "TITLE: t\nROUTE: simple\nDOMAIN: code\nRISK: low\nSIZE: small\n")
+        self.assertEqual(s["route"], "direct")  # simple is the old name of direct
         self.assertEqual(s["skills"], [{"name": "tdd", "stage": "plan"}, {"name": "tdd", "stage": ""},
                                        {"name": "custom", "stage": "review"}])
         msgs = " ".join(str(c) for c in self.warn.call_args_list)

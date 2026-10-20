@@ -2,8 +2,8 @@
 
 ## Status and boundary
 
-All five phases are implemented; Phase 5 makes the game-dev preset the default of this branch. Keep the serial stage executor, the `simple`/`complex`/`hard` routes, the four
-stage kinds (`plan`, `plan_review`, `implement`, `review`) and Markdown handoffs.
+All five phases are implemented; Phase 5 makes the game-dev preset the default of this branch. Keep the serial stage executor, the `direct` (was `simple`)/`bundled`/`planned`/`complex`/`hard` routes, the
+stage kinds (`plan`, `plan_review`, `implement`, `review`, plus the combined `plan_implement`) and Markdown handoffs.
 No workflow graph, no autonomous spawning.
 
 Tooling note: the `team` command resolves to the main checkout's `agent-team/`.
@@ -34,7 +34,10 @@ Instructions (the agent prompt body).
   generic built-in agents, shipped as the default agent files. They stay usable
   as route defaults; the producer remains the routing/coordinator agent.
 - A game project adds discipline agents (designer, gameplay, engine, tools,
-  technical_artist, audio, qa, build_release) beside them. Agents are discipline identity
+  technical_artist, audio, qa, build_release, and the side-task agents
+  narrative, vfx, ui) beside them. No `[routing.domain.*]` table uses
+  narrative, vfx or ui, so the Producer never routes to them; they run with
+  `team new --role`, or `team-setup` makes them stage owners of a domain. Agents are discipline identity
   (prompt, scope); model/effort is chosen separately (section 3).
 
 ## 2. Per-domain stage routing
@@ -50,7 +53,9 @@ implement   = "technical_artist"
 review      = "qa"
 ```
 
-- Keys: `plan`, `plan_review`, `implement`, `review`; each names an agent.
+- Keys: `plan`, `plan_review`, `implement`, `review`; each names an agent. `skip = ["plan"|"plan_review"]` lists stages
+  this domain drops on non-hard routes (see Adaptive pipeline in `AGENT_TEAM.md`). A `plan_implement` stage uses the
+  domain's `implement` agent, which then counts as the author of both plan and implement.
 - An unset stage uses the route's default agent for that stage.
 - Validate agent names at load; reject stages absent from the selected route.
 - Reviewer independence: a review/plan_review agent must differ from the
@@ -92,10 +97,10 @@ failure can still step up before going to the user.
 
 Agent skills (frontmatter `skill: name | path | when`) are listed in a
 "Skills you have" table of paths in the prompt and read on demand, not inlined.
-Bundled: `technical_artist` gets `material-authoring`, `shaders`, `animation`;
-`engine` gets `shaders`, `optimization`, `perf-capture`; `gameplay` gets
-`animation`; `designer` gets `level-design`, `balancing`. A row duplicated by a
-task skill is dropped. The rest of this section is about task skills.
+Bundled: every discipline agent and `director` list their skills from the
+41-skill library; `agent-team/templates/skills/INDEX.md` maps skill -> roles ->
+agents and `docs/GAME_DEV_ROLES.md` holds the research (`docs/BLENDER_SKILLS.md`
+for the 4 `blender-*` DCC skills). A row duplicated by a task skill is dropped. The rest of this section is about task skills.
 
 Task skills are task-specific Markdown files, not domain-bound.
 

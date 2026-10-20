@@ -17,6 +17,11 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 DOMAIN_STAGES = ("plan", "plan_review", "implement", "review")
+STAGE_KINDS = DOMAIN_STAGES + ("plan_implement",)  # plan_implement: one agent plans, then implements, in one run
+ROUTE_ALIASES = {"simple": "direct"}  # old route names still load; state and rules are read through canon_route
+LIGHT_ROUTES = ("direct", "bundled", "planned")
+UPGRADE = {"direct": "planned", "bundled": "planned", "planned": "complex"}  # route a failed review retries on
+SKIPPABLE = ("plan", "plan_review")  # the review gate is never skipped; plan implies plan_review
 AGENT_NAME = re.compile(r"^[a-z0-9_]+$")  # it becomes a file name and the `NN-kind-<agent>` stem
 SKILL_NAME = re.compile(r"^[a-z0-9_-]+$")  # it becomes the file name skills/<name>.md
 AGENT_KEYS = ("name", "scope", "model", "effort", "pin", "skill")
@@ -24,19 +29,20 @@ EFFORTS = ("low", "medium", "high", "xhigh", "max")
 EFFORT_ORDER = ("minimal",) + EFFORTS  # one total order over Claude and Codex effort words
 CLI_EFFORTS = {"claude": EFFORT_ORDER[1:], "codex": EFFORT_ORDER[:-1]}  # what each cli accepts
 RISKS, SIZES = ("low", "medium", "high"), ("small", "medium", "large")
-HEURISTIC_STAGES = ("route",) + DOMAIN_STAGES
+HEURISTIC_STAGES = ("route",) + STAGE_KINDS
 USAGE_STATES = ("low", "claude", "codex", "mixed")  # [[heuristic.rule]] when.usage
+MCP_MODES = ("none", "write", "all")  # Claude runs: which stages load the user's MCP servers
 CANONICAL_ROLES = ("producer", "mid", "senior", "architect", "director")
 DEFAULTS = {
     "project": {"name": "project", "root": ".", "state_dir": ".agent-team", "templates_dir": "", "team_setup": "",
                 "docs": ["AGENTS.md", "SPEC.md", "ROADMAP.md", "TASKS.md", "docs/"],
                 "queue_file": "queue.txt", "planning_file": "TASKS.md"},
     "vcs": {"kind": "git", "guard_names": ["git"], "deny": {}, "deny_flags": {}},
-    "agents": {"deny_extra": []},
+    "agents": {"deny_extra": [], "mcp": "write", "user_skills": False},
     "locks": {"names": [], "default": []},
     "routing": {"max_rounds": 2, "max_parallel": 3, "long_stage_min": 120, "domains": ["code"], "review_extra_domains": [],
                 "extra_review_role": "", "extra_review_routes": [], "domain_roles": {}, "domain": {},
-                "pipeline": {}, "side_task_reviewer": "architect", "side_task_roles": [],
+                "pipeline": {}, "skip": {}, "side_task_reviewer": "architect", "side_task_roles": [],
                 "side_task_domains": {}, "takeover": {}, "after_impl_fails": {}, "capacity_fallback": {},
                 "usage": {"enabled": False}},
     "queue": {"refill": True, "low_water": 1, "batch": 3, "daily_cap": 10, "pause_needs_you": 2, "cooldown_min": 30},
@@ -49,6 +55,27 @@ DEFAULTS = {
 USAGE_DEFAULTS = {"claude_fallback": {}, "limits": {"5h": 90.0, "7d": 95.0}, "scoped_limit": {},
                   "surplus_swap": {}, "burst_swap": {}, "burst_file": "", "cheap_first": [],
                   "no_burst_effort": {}, "escalation_gate": {}}
+
+
+def canon_route(route):
+    return ROUTE_ALIASES.get(route, route)
+
+
+def norm_kind(kind):
+    """Stage kind as the author of its work: plan_implement is the implement stage (and the plan author)."""
+    return "implement" if kind == "plan_implement" else kind
+
+
+def skip_set(cfg, route, domain):
+    """Stage kinds the config skips for route/domain: [routing.skip] <route> plus [routing.domain.<name>] skip.
+    Never on hard or custom routes, never review; skipping plan also skips plan_review."""
+    route = canon_route(route)
+    R = cfg["routing"]
+    if route == "hard" or (route or "").startswith("custom:"):
+        return frozenset()
+    kinds = set(R["skip"].get(route, ())) | set(R["skip"].get("simple" if route == "direct" else route, ())) \
+        | set(R["domain"].get(domain, {}).get("skip", ()))
+    return frozenset(kinds | ({"plan_review"} if "plan" in kinds else set()))
 
 
 def _merge(base, over):
@@ -92,14 +119,23 @@ def load(path=None):
         if r["cli"] not in ("claude", "codex"):
             raise ValueError(f"team.toml [roles.{key}] cli must be claude or codex")
     cfg["roles"] = roles
+    if cfg["agents"]["mcp"] not in MCP_MODES:
+        raise ValueError(f"team.toml [agents] mcp must be one of {', '.join(MCP_MODES)}")
     pipes = cfg["routing"]["pipeline"]
-    for route in ("simple", "complex", "hard"):
+    for alias, route in ROUTE_ALIASES.items():  # direct is canonical, simple the old name
+        if route not in pipes and alias in pipes:
+            pipes[route] = pipes[alias]
+        elif alias not in pipes and route in pipes:
+            pipes[alias] = pipes[route]
+    for route in ("direct", "complex", "hard"):
         if route not in pipes:
-            raise ValueError(f"team.toml [routing.pipeline] needs {route}")
+            raise ValueError(f"team.toml [routing.pipeline] needs {route} (or simple)")
     for route, stages in pipes.items():
         for kind, role in stages:
-            if role not in roles or kind not in ("plan", "plan_review", "implement", "review"):
+            if role not in roles or kind not in STAGE_KINDS:
                 raise ValueError(f"team.toml pipeline {route}: bad stage {kind}/{role}")
+    _light_routes(pipes)
+    _check_skip(cfg)
     cfg["heuristic"] = _load_heuristic(cfg, raw.get("heuristic"))
     cfg["agent_defs"] = _load_agents(cfg)
     _domain_tables(cfg)
@@ -113,6 +149,28 @@ def load(path=None):
             raise ValueError(f"team.toml {where} references unknown role {role!r}")
     _check_apex(cfg)
     return cfg
+
+
+def _light_routes(pipes):
+    """bundled and planned come from direct and complex unless the config defines them."""
+    direct = pipes["direct"]
+    impl = next((r for k, r in direct if k in ("implement", "plan_implement")), None)
+    rev = next((r for k, r in direct if k == "review"), None)
+    if "bundled" not in pipes and impl and rev:
+        pipes["bundled"] = [["plan_implement", impl], ["review", rev]]
+    if "planned" not in pipes:
+        pipes["planned"] = [list(x) for x in pipes["complex"] if x[0] != "plan_review"]
+
+
+def _check_skip(cfg):
+    """[routing.skip] route -> stage kinds to skip; refused for hard and for review (the gate stays)."""
+    R = cfg["routing"]
+    for route, kinds in R["skip"].items():
+        where = f"team.toml [routing.skip] {route}"
+        if route not in R["pipeline"] or canon_route(route) == "hard":
+            raise ValueError(f"{where}: not a route that may skip stages (hard never skips)")
+        if not isinstance(kinds, list) or any(k not in SKIPPABLE for k in kinds):
+            raise ValueError(f"{where} must be a list of {', '.join(SKIPPABLE)} (the review gate is never skipped)")
 
 
 def _parse_agent(path):
@@ -206,7 +264,11 @@ def _stage_agents(cfg, route, dom):
     over = cfg["routing"]["domain"].get(dom, {})
     out = {}
     for kind, role in cfg["routing"]["pipeline"][route]:
-        out.setdefault(kind, []).append(over.get(kind, role))
+        if kind == "plan_implement":  # one agent authors both: the domain's implement agent
+            out.setdefault("plan", []).append(over.get("implement", role))
+            out.setdefault("implement", []).append(over.get("implement", role))
+        else:
+            out.setdefault(kind, []).append(over.get(kind, role))
     return out
 
 
@@ -239,7 +301,8 @@ def _domain_tables(cfg):
     """Fold the deprecated domain_roles into the unset plan/implement of [routing.domain.<name>], then validate."""
     R = cfg["routing"]
     R["domain"] = {d: (dict(t) if isinstance(t, dict) else t) for d, t in R["domain"].items()}  # never mutate DEFAULTS
-    in_routes = {k for stages in R["pipeline"].values() for k, _ in stages}
+    in_routes = {norm_kind(k) for stages in R["pipeline"].values() for k, _ in stages}
+    in_routes |= {"plan" for stages in R["pipeline"].values() for k, _ in stages if k == "plan_implement"}
     cfg["deprecated_domain_roles"] = bool(R["domain_roles"])
     for dom, role in R["domain_roles"].items():
         tbl = R["domain"].setdefault(dom, {})
@@ -253,7 +316,12 @@ def _domain_tables(cfg):
             raise ValueError(f"{where} is not listed in routing.domains")
         if not isinstance(tbl, dict):
             raise ValueError(f"{where} must be a table")
+        skip = tbl.get("skip", [])
+        if not isinstance(skip, list) or any(k not in SKIPPABLE for k in skip):
+            raise ValueError(f"{where} skip must be a list of {', '.join(SKIPPABLE)} (the review gate is never skipped)")
         for k, name in tbl.items():
+            if k == "skip":
+                continue
             if k not in DOMAIN_STAGES:
                 raise ValueError(f"{where} has unknown stage {k!r} (use {', '.join(DOMAIN_STAGES)})")
             if k not in in_routes:
@@ -476,8 +544,12 @@ def _matches(when, inp):
                 return False
             continue
         want, got = (v if isinstance(v, list) else [v]), inp.get(k)
-        if k == "route" and str(got or "").startswith("custom:"):
-            got = "custom"
+        if k == "route":
+            got, want = canon_route(got), [canon_route(x) for x in want]
+            if str(got or "").startswith("custom:"):
+                got = "custom"
+        if k == "stage" and got == "plan_implement" and {"plan", "implement"} & set(want):
+            continue  # a rule on either half applies to the combined stage
         if got not in want:
             return False
     return True

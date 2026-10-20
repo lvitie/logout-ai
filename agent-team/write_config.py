@@ -18,6 +18,7 @@ NAMES = {"producer": "Producer", "mid": "Mid Dev", "mid_high": "Mid Dev (high)",
          "cmid_high": "Mid Dev (Codex, high)", "csenior": "Senior Dev (Codex)", "cdirector": "Tech Director (Codex)",
          "capex": "Apex (Codex)", "mid_claude": "Mid Dev (Claude)",
          "director_claude": "Tech Director (Claude)"}
+# The adaptive routes (direct, bundled, planned) reuse these canonical roles: bundled/direct implement with `mid`.
 # Canonical roles per preset. Codex implements simple and complex work and Claude reviews it; hard work is planned
 # by Codex, built by Claude (both). The codex-only preset gives codex profiles the canonical names.
 CANON = {"claude": {k: PROFILES[k] for k in ("producer", "mid", "senior", "architect", "director")},

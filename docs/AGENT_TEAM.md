@@ -33,7 +33,7 @@ Python interpreter found at setup; rerun setup after removing them if that inter
 
 - `claude`: Claude Code for every role.
 - `codex`: Codex CLI for every role.
-- `both`: Claude produces, plans `complex` work and reviews; Codex implements `simple`/`complex` work, plans `hard`
+- `both`: Claude produces, plans `complex` work and reviews; Codex implements `direct`/`bundled`/`planned`/`complex` work, plans `hard`
   work and does the extra `hard` review, so each CLI reviews the other's output.
 
 Then which version control the project uses:
@@ -55,7 +55,10 @@ way. Then, from the project:
 team new "add a stamina bar"      # create a change, route, run the pipeline
 team new --no-run "later"         # create only; start with `team run <id>`
 team new --skill tdd --skill perf-capture@review "..."  # task skills for this task (all stages, or one)
-team status [id]                  # `-r` newest first
+team new "..." --route direct     # override the Producer's route (direct|bundled|planned|complex|hard)
+team status [id]                  # `-r` newest first; with an id also tokens, cost and skipped stages
+team status --metrics             # per-route tokens, wall time, first-pass rate, rounds, upgrades, escalations
+team tokens [ids] [--runs]        # tokens, cost, time per stage kind, agent and task
 team approve <id> ["note"]        # pass a gate or retry after escalation/failure
 team redo <id> "feedback"         # send back to the implementer (or Producer)
 team drop <id> ["note"]
@@ -169,13 +172,13 @@ applies. The content is never inlined.
   skill number and both tried paths.
 - Skipped for the route and refill prompts and for agents without the line (legacy `roles/` files, `[roles]`-only keys).
 - A row is dropped when a task skill (below) has the same name or resolves to the same file; the task skill stays inlined.
-- Bundled: `technical_artist` (`material-authoring`, `shaders`, `animation`), `engine` (`shaders`, `optimization`,
-  `perf-capture`), `gameplay` (`animation`), `designer` (`level-design`, `balancing`).
+- Bundled: every discipline agent and `director` list their skills; `agent-team/templates/skills/INDEX.md` maps each
+  skill to its AAA roles and agents (generated from the frontmatter, checked by `test_skill_library.py`).
 
 ## Task skills
 
 A task skill is a Markdown file `<templates_dir>/skills/<name>.md` (`[a-z0-9_-]+`; bundled fallback in
-`agent-team/templates/skills/`: `tdd`, `perf-capture`, `unreal-review`, `shaders`, `animation`, `level-design`, `balancing`, `netcode`, `optimization`, `material-authoring`). It is extra instructions for one task, not part
+`agent-team/templates/skills/`: the 41 game-dev skills listed in `INDEX.md`, researched in `docs/GAME_DEV_ROLES.md`; Blender skills in `docs/BLENDER_SKILLS.md`). It is extra instructions for one task, not part
 of an agent and not tied to a domain.
 
 - Attach with `team new --skill name[@stage]` (repeatable or comma list; stage is `plan`, `plan_review`, `implement` or
@@ -188,11 +191,50 @@ of an agent and not tied to a domain.
 - A warning is logged for a skill over 6000 characters or one attached to a stage the task's pipeline does not run.
   Queue lines and `team promote` have no skill syntax.
 
+## Adaptive pipeline
+
+The full plan -> plan_review -> implement -> review cycle runs only when the task needs it. The Producer picks the
+lightest route that keeps the quality bar (criteria in `templates/jobs/route.md`):
+
+| route | stages | when |
+|---|---|---|
+| `direct` (old `simple`) | implement, review | small, low risk, one file or clear spec, no design choice, reversible |
+| `bundled` | plan_implement, review | like direct, but a short plan helps; the plan is the first section of the report |
+| `planned` | plan, implement, review | plan matters, low/medium risk, reviewer catches design errors in the diff |
+| `complex` | plan, plan_review, implement, review | design choices, medium/high size |
+| `hard` | plan, plan_review, implement, review (+ extra review) | ambiguous, very hard; never skips |
+
+- The review gate and the acceptance checks are identical on every route; a bundled report is reviewed for plan and change.
+- Always plan + plan_review (complex/hard) for: high risk, schema/API/protocol changes, shared or hard-to-undo
+  changes, ambiguity, earlier failed attempts. `route_task` raises a lighter pick to `complex` on high risk or earlier
+  failures; a forced lighter route (`team new --route`) over a `hard` verdict stays `hard`.
+- `plan_implement` is a stage kind for pipeline lists: one agent plans, then implements, in one run. It is the author
+  of both plan and implement (reviewer-independence checks, `@plan`/`@implement` skills, the domain `implement` agent)
+  and writes `plan` and `report` in the task state. Existing pipelines without it are unchanged; `simple` in state,
+  config or rules is read as `direct`, and a stored `simple` task keeps its old behaviour (no upgrade).
+- Skip defaults: `[routing.skip] complex = ["plan_review"]` and `skip = ["plan"]` in `[routing.domain.<name>]` drop those
+  stages from non-hard routes (`plan` implies `plan_review`; `review` and `hard` are refused at load).
+- Upgrade on failure: a failed review on a route without its plan retries one route up (`direct`/`bundled` -> `planned`,
+  `planned` -> `complex`, a configured skip is dropped via `no_skip`) at the plan stage, which receives the review
+  findings. The failed review counts once for `failures_min` (as an implementation failure; the upgrade adds nothing), and `redo` keeps `no_skip`.
+- Tiers: `direct` and `planned` run on the roles of their stages (the cheap `mid` implementer; none of the
+  hard/high-risk rules match). A `bundled` run starts on the implementer role, and the `bundled-implementer` rule gives it at least
+  tier `mid` at medium/high risk. Escalation steps are kept when `plan_implement` becomes `implement`.
+
+Metrics (defined before the routes; counters in `state.json` are cumulative and survive redo/approve): tokens per task
+(`tokens.collect`), wall time (created to `first_finish`), first-pass review pass rate (`first_pass`, set by the first
+review verdict only), review rounds (`review_rounds_total`, every review verdict), upgrades (`upgrades`), escalations
+(`escalations`: tier step-ups and hand-offs to the user), skipped stage count, grouped by the route first chosen
+(`route_initial`). `team status --metrics`, the focus panel (ROUTES) and the review page (Route metrics) show them;
+skipped stages show as `skipped: plan,plan_review` in `team status <id>`, the focus rows and the review cards. Tune the
+skip criteria from data: a route with a low first-pass rate or frequent upgrades should be used less.
+
 ## Layout
 
 | Path | Purpose |
 | --- | --- |
 | `agent-team/team.py` | orchestrator (pipeline, role selection, locks, task state) |
+| `agent-team/tokens.py` | `team tokens`: tokens, cost and time per stage kind, agent and task from the stage logs |
 | `agent-team/teamcfg.py` | `team.toml` loader, XDG/agent-home helpers, template lookup |
 | `agent-team/windows_dashboard.py` | native Windows Terminal layout and project-bound console panes |
 | `agent-team/vcs.py`, `vcs_p4.py` | VCS adapter interface, git adapter, Perforce adapter |
@@ -218,13 +260,15 @@ profiles, the `# --- ladder` rows and, for `git`/`none`, the `[vcs]` block.
 - `[vcs]`: `kind` (`git`, `none` or any `X` with `agent-team/vcs_X.py`), `guard_names`, `deny` (tool -> denied
   subcommands, `"*"` = whole tool), `deny_flags` (tool -> subcommand -> refused flags).
 - `[agents].deny_extra`: extra Claude `Bash(...)` deny rules. Rules from `[vcs.deny]` are added automatically.
+- `[agents].mcp` (`write` default, `none`, `all`): which Claude stages load the user's MCP servers (read-only stages skip them by default);
+  `[agents].user_skills` (default false): load the user's own skills/slash commands. See `docs/TOKEN_EFFICIENCY.md`.
 - `[locks]`: `names`, `default`; `[locks.<name>]` may set `min_free_mib`, `probe_cmd` (prints free MiB first) and
   `skip_if_holds`; the check is skipped when the probe binary is missing. Different locks run in parallel, the
   same lock is exclusive, `max_parallel` caps concurrent runs.
 - `[probes]`: `name = url`, reported to agents as `name up|down`. Empty by default.
 - `[roles.<key>]`: `name`, `cli` (`claude`|`codex`), `model`, `effort`. `producer`, `mid`, `senior`, `architect`,
   `director` are required; others are free.
-- `[routing]`: `pipeline.simple|complex|hard` (stage kind + role lists), `domains`, `review_extra_domains`,
+- `[routing]`: `pipeline.direct|bundled|planned|complex|hard` (stage kind + role lists; `simple` is the old name of `direct`; `bundled` and `planned` derive from `direct`/`complex` unless set), `skip` (see Adaptive pipeline), `domains`, `review_extra_domains`,
   `extra_review_routes`, `extra_review_role`, `domain.<name>`, `side_task_*`, `takeover.<role>`,
   `after_impl_fails`, `capacity_fallback`, `max_rounds` (minor failed review rounds per target before escalating to the user), `max_parallel`, `long_stage_min`.
 - Agents: `agents/<name>.md` with frontmatter `name` (`[a-z0-9_]+`, equals the file name), `scope`, optional `model` and
@@ -238,8 +282,8 @@ profiles, the `# --- ladder` rows and, for `git`/`none`, the `[vcs]` block.
 - `[heuristic]` (optional, the model/effort heuristic): `[heuristic.tiers]` is the ladder, weakest first, each tier
   naming a `[roles]` profile per cli (`low = { claude = "mid", codex = "mid_codex" }`; the shipped ladder is in `docs/MODEL_LADDER.md`; a tier may have one cli).
   `[[heuristic.rule]]` entries (`name`, `when`, `min`) are evaluated top to bottom. `when` keys (all must match; a list
-  is any-of): `route` (`simple|complex|hard|custom`), `domain`, `risk` (`low|medium|high`), `size`
-  (`small|medium|large`), `stage` (`route|plan|plan_review|implement|review`), `failures_min` (rejected plans plus
+  is any-of): `route` (`direct|bundled|planned|complex|hard|custom`; `simple` = `direct`), `domain`, `risk` (`low|medium|high`), `size`
+  (`small|medium|large`), `stage` (`route|plan|plan_review|implement|plan_implement|review`; a `plan_implement` run matches `plan` and `implement` rules), `failures_min` (rejected plans plus
   implementations of this task) and `usage` (`low|claude|codex|mixed`). `min` has `tier` and/or `effort`. A rule sets
   a minimum only (there is no exact-tier key, a settled choice): the highest tier minimum wins (the first rule
   reaching it decides), no matching rule gives the weakest tier, and the effort is the highest of the profile's effort,
@@ -382,7 +426,8 @@ dump, set it as Claude Code's `statusLine` command.
 What `templates/team.toml` and the setup preset ship, and what `team-setup` confirms and tailors:
 
 - Agents (`templates/agents/`): `producer`, `designer`, `gameplay`, `engine`, `tools`, `technical_artist`, `audio`, `qa`,
-  `build_release`, `director`, plus the generic `mid`, `senior`, `architect`. An agent is discipline identity (prompt,
+  `build_release`, `director`, the side-task agents `narrative`, `vfx`, `ui` (no domain stage table uses them;
+  `side_task_domains` maps them to `design`, `technical_art`, `gameplay`), plus the generic `mid`, `senior`, `architect`. An agent is discipline identity (prompt,
   scope), not a model: the bundled files carry no `model`/`effort`. The model and effort of each stage come from the
   route's `[roles]` profile and `[heuristic]`, and an agent without a `[roles]` entry runs on the profile of the
   route's role for that stage.
@@ -402,9 +447,10 @@ What `templates/team.toml` and the setup preset ship, and what `team-setup` conf
   values must be in `routing.domains`.
 - Locks: `editor` (default, every task), `gpu` (free-memory probe, skipped while `editor` is held) and `build`; pick
   others with `team new --res gpu|build|none`. `locks.default` entries must be in `names`.
-- Task skills: `shaders`, `animation`, `level-design`, `balancing`, `netcode` and `optimization` (baseline with
-  `perf-capture`, touch only the requested hot path, record before and after, drop changes without a gain), beside `tdd`,
-  `perf-capture` and `unreal-review`.
+- Task skills: 41 grouped by workflow across design, programming, art, audio, production and quality (`INDEX.md`;
+  `optimization` baselines with `perf-capture`, touches only the requested hot path, records before and after and drops
+  changes without a gain). Each has `## When to use` (with a `Not for:` boundary), `## Inputs`, `## Method`,
+  `## Checks`, `## Pitfalls`, `## Engine notes`, under 60 lines and 450 words.
 - VCS: `p4` with the Perforce deny lists; this branch does not keep the generic `code`-only preset.
 
 ## Tests

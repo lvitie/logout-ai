@@ -15,13 +15,16 @@ scratch:
 
 - Agents (discipline identity, no model): `producer`, `designer`, `gameplay`,
   `engine`, `tools`, `technical_artist`, `audio`, `qa`, `build_release`,
-  `director`, plus the generic `mid`, `senior`, `architect`.
+  `director`, the side-task agents `narrative`, `vfx`, `ui` (no domain stage
+  table uses them; offer them as stage owners of a domain, for example a new
+  `ui` domain, if the user wants), plus the generic `mid`, `senior`, `architect`.
 - Domains with full stage tables: `gameplay`, `engine`, `tools`, `technical_art`,
   `audio`, `design`, `build`. Model and effort come from the route's `[roles]`
   profile and `[heuristic]` (tiers low/mid/high/top/apex, rules `hard-route`, `high-risk`,
   `repeat-failures`), not from the agent.
-- Task skills: `shaders`, `animation`, `level-design`, `balancing`, `netcode`,
-  `optimization`, `perf-capture`, `tdd`, `unreal-review`.
+- Task skills: 41 game-dev skills covering AAA studio roles, listed with their
+  roles and agents in `agent-team/templates/skills/INDEX.md` (research:
+  `docs/GAME_DEV_ROLES.md`).
 - VCS `p4` (Unreal/Perforce) and locks `editor` (default), `gpu`, `build`.
 
 ## Inputs
