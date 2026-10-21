@@ -277,6 +277,14 @@ profiles, the `# --- ladder` rows and, for `git`/`none`, the `[vcs]` block.
   (new findings, report, notes, diagnosis), then the job. A resume the CLI refuses before any output is retried once
   fresh (`resume failed, fresh session` in `live.log`). Done and dropped tasks clear their sessions. Set false if
   resumed reviewers anchor on their earlier view.
+  `[agents].windows_exec` (default `[]`, WSL only): Windows programs Codex writers may run, as file names
+  (`["cmd.exe", "powershell.exe", "p4.exe"]`). WSL starts a `.exe` over an AF_VSOCK socket, which Codex's Linux sandbox
+  refuses (`UtilBindVsockAnyPort: socket failed 1`, even with network access), so these go through `winexec.py`: the
+  agent runs a listed program by bare name (a guard-bin shim) or `winexec <path> [args]`, the request lands in
+  `<task>/winexec/`, and the team process runs it outside the sandbox and streams stdout, stderr and the exit code
+  back (no stdin). Implement stages get the rule in their prompt. A listed program runs with the user's rights, so
+  list only what agents need (`cmd.exe` can do anything). Read-only Codex stages cannot use it, and Claude agents
+  (no sandbox) run the programs directly through the same shims.
 - `[locks]`: `names` are shared resources (editor, GPU, build) that an agent leases only while it uses one:
   implement stages get the rule and the exact commands, `team lock <name> [--wait S]` before starting it (exit 3
   while another task or `team hold` has it) and `team unlock <name>` as soon as it stops. A lease lives in

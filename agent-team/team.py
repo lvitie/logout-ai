@@ -24,6 +24,7 @@ sys.path.insert(0, str(HERE))
 import teamcfg  # noqa: E402
 import tokens  # noqa: E402
 import vcs as vcsmod  # noqa: E402
+import winexec  # noqa: E402
 
 CLIP = 6000  # max chars of any hand-off inlined into a prompt
 RESUME_KINDS = ("plan", "plan_review", "implement", "plan_implement", "review")  # [agents] resume: rounds continue a session
@@ -76,6 +77,11 @@ def ensure_guards():
     guard = HERE / "bin/vcs-guard"
     _put(_guard_dir() / "root", text=f"{WS}\n")  # the guard lets git run in repos outside the root
     _put(_guard_dir() / "config", text=f"{CFG['config_path']}\n")
+    if windows_exec():  # WSL: Windows programs by bare name go through the spool (winexec.py) in a Codex sandbox
+        py, wx = Path(sys.executable).as_posix(), (HERE / "winexec.py").as_posix()
+        _put(_guard_dir() / "winexec", text=f'#!/bin/sh\nexec "{py}" "{wx}" "$@"\n', mode=0o755)
+        for name in CFG["agents"]["windows_exec"]:
+            _put(_guard_dir() / name, text=f'#!/bin/sh\nexec "{py}" "{wx}" {name} "$@"\n', mode=0o755)
     for name in CFG["vcs"]["guard_names"]:
         link = _guard_dir() / name
         if os.name != "nt":
@@ -379,6 +385,19 @@ def diff_summary(path, limit=40):
     return "\n".join(rows + ([f"- ... {len(files) - limit} more"] if len(files) > limit else []))
 
 
+def windows_exec():
+    """The [agents] windows_exec programs, when they apply (on WSL); else []."""
+    return CFG["agents"]["windows_exec"] if winexec.is_wsl() else []
+
+
+def winexec_note():
+    if not windows_exec():
+        return ""
+    return ("## Windows programs\nThe sandbox cannot start a Windows .exe directly (WSL interop is blocked). Run "
+            f"{', '.join(windows_exec())} by bare name, or any of them by path as `winexec <program> [args]`: output "
+            "and exit code come back as usual, stdin is not passed. A `/mnt/c/...exe` path run directly fails.")
+
+
 def lock_note():
     """The shared-resource rule for stages that run commands: lease a [locks] resource only while it is in use."""
     names = [n for n in CFG["locks"]["names"] if n != "none"]
@@ -399,6 +418,7 @@ def prompt_parts(s, kind, agent, skills=()):
              ("common", fmt(teamcfg.template(CFG, "roles/common.md"))),
              ("vcs", fmt(teamcfg.template(CFG, f"vcs/{CFG['vcs']['kind']}.md"))),
              ("locks", lock_note() if is_impl(kind) else ""),
+             ("windows", winexec_note() if is_impl(kind) else ""),
              ("task", f"Task {s['id']} | {noun()} {s['change']} | folder {d} | {s.get('route')}/{s.get('domain')}"
               + (f" | {probes}" if probes else "")),
              ("request", "## Request\n" + s["request"])]
@@ -1002,6 +1022,10 @@ def _run_agent_once(s, kind, agent, role, burst, ctx=None):
     ensure_guards()
     env = dict(os.environ, TEAM_TASK=s["id"], TEAM_CHANGE=str(s["change"]), TEAM_ROLE=agent, TEAM_STAGE=stem,
                TEAM_CONFIG=CFG["config_path"], PATH=f"{_guard_dir()}{os.pathsep}{_clean_path()}")
+    spool = d / "winexec" if cli == "codex" and is_impl(kind) and windows_exec() else None  # Codex sandboxes writers
+    env.pop("TEAM_WINEXEC", None)
+    if spool:
+        env["TEAM_WINEXEC"] = str(spool)
     for tool in CFG["vcs"]["guard_names"]:  # used by the edit hook; the guard falls back to a PATH search
         real = shutil.which(tool, path=_clean_path())
         if real:
@@ -1020,8 +1044,9 @@ def _run_agent_once(s, kind, agent, role, burst, ctx=None):
     spoke = False  # any assistant output: a failed resume without it is retried fresh
     untracked = []  # Codex edits that could not join the task's change
     session = {} if os.name == "nt" else {"start_new_session": True}  # its own process group, reaped as a whole
-    with raw.open("w") as rawf, subprocess.Popen(cmd, cwd=WS, env=env, text=True, stdin=subprocess.PIPE,
-                                                  stdout=subprocess.PIPE, stderr=subprocess.STDOUT, **session) as proc:
+    with winexec.serving(spool, windows_exec(), _clean_path()), raw.open("w") as rawf, \
+            subprocess.Popen(cmd, cwd=WS, env=env, text=True, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                             stderr=subprocess.STDOUT, **session) as proc:
         try:
             try:
                 proc.stdin.write(text)

@@ -138,6 +138,24 @@ class Flags(unittest.TestCase):
         for part in ("## Request", "R\n", "old"):
             self.assertNotIn(part, text)
 
+    def test_windows_exec_on_wsl(self):
+        d = self.init()
+        (d / "team.toml").write_text((d / "team.toml").read_text() + '\n[agents]\nwindows_exec = ["cmd.exe"]\n')
+        team.CFG = None
+        team.init(d / "team.toml")
+        s = team.load(team.create_task("diagnose")["id"])
+        self.assertNotIn("## Windows programs", team.build_prompt(s, "implement", "mid"))  # not WSL
+        with unittest.mock.patch.object(team.winexec, "is_wsl", return_value=True):
+            team.ensure_guards()
+            self.assertIn("winexec.py\" cmd.exe", (team._guard_dir() / "cmd.exe").read_text())
+            self.assertTrue((team._guard_dir() / "winexec").exists())
+            self.assertIn("## Windows programs", team.build_prompt(s, "implement", "mid"))
+            self.assertNotIn("## Windows programs", team.build_prompt(s, "review", "architect"))
+        (d / "team.toml").write_text((d / "team.toml").read_text().replace('"cmd.exe"', '"/mnt/c/x.exe"'))
+        team.CFG = None
+        with self.assertRaisesRegex(ValueError, "windows_exec must be a list of program file names"):
+            team.init(d / "team.toml")
+
     def test_bad_resume_value_is_refused(self):
         d = self.init()
         (d / "team.toml").write_text((d / "team.toml").read_text() + '\n[agents]\nresume = "yes"\n')
