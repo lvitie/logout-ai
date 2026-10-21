@@ -184,8 +184,9 @@ class Agents(unittest.TestCase):
                 mock.patch.object(team, "ensure_guards"), self.assertRaises(RuntimeError):
             team._run_agent_once(s, "implement", "artist", "mid", True)
         got = json.loads((team.task_dir("t001") / "state.json").read_text())["launches"]
+        self.assertEqual(len(got[0].pop("session")), 36)  # a fresh Claude session id, chosen before the launch
         self.assertEqual(got, [{"stem": "01-implement-artist", "agent": "artist", "profile": "mid", "cli": "claude",
-                                "model": "x1", "effort": "high"}])
+                                "model": "x1", "effort": "high", "resumed": False}])
 
     def test_history_readers_fall_back_to_stems(self):
         self.init()

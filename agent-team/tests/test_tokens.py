@@ -104,6 +104,47 @@ class Flags(unittest.TestCase):
             self.assertIn(arg, ro)
             self.assertNotIn(arg, rw)
 
+    def test_session_flags(self):
+        d = self.init()
+        self.assertEqual(team.agent_cmd("claude", "m", "low", True, "o", "S")[-2:], ["--session-id", "S"])
+        self.assertEqual(team.agent_cmd("claude", "m", "low", True, "o", "S", True)[-2:], ["--resume", "S"])
+        self.assertNotIn("--session-id", team.agent_cmd("claude", "m", "low", True, "o"))
+        fresh, res = team.agent_cmd("codex", "m", "low", False, "o"), team.agent_cmd("codex", "m", "low", False, "o", "T", True)
+        self.assertEqual(fresh[:3], ["codex", "exec", "-m"])
+        self.assertIn("-C", fresh)
+        self.assertEqual(fresh[-3:], ["-s", "workspace-write", "-"])
+        self.assertEqual(res[:3], ["codex", "exec", "resume"])  # resume has no -C or -s: cwd is the workspace
+        self.assertNotIn("-C", res)
+        self.assertNotIn("-s", res)
+        self.assertEqual(res[-4:], ["-c", 'sandbox_mode="workspace-write"', "T", "-"])
+        self.assertEqual(team.agent_cmd("codex", "m", "low", True, "o", "T", True)[-3:-2], ['sandbox_mode="read-only"'])
+        (d / "team.toml").write_text((d / "team.toml").read_text() + '\n[agents]\ncodex_sandbox = "user"\n')
+        team.CFG = None
+        team.init(d / "team.toml")
+        res = team.agent_cmd("codex", "m", "low", False, "o", "T", True)
+        self.assertEqual(res[-2:], ["T", "-"])
+        self.assertFalse(any("sandbox_mode" in a for a in res))
+
+    def test_resumed_prompt_sends_only_changed_sections(self):
+        parts = [("role", "R"), ("request", "## Request\nq"), ("findings:05-review-a", "## Earlier findings\nold"),
+                 ("job", "## Job\nj")]
+        seen = team.section_hashes(parts)
+        later = parts[:2] + [("findings:07-review-a", "## Earlier findings\nnew"), ("notes", "## User notes\n- n"),
+                             ("job", "## Job\nj")]
+        text = team.resume_prompt(later, seen)
+        self.assertTrue(text.startswith(team.RESUME_LINE))
+        for part in ("new", "- n", "## Job"):
+            self.assertIn(part, text)
+        for part in ("## Request", "R\n", "old"):
+            self.assertNotIn(part, text)
+
+    def test_bad_resume_value_is_refused(self):
+        d = self.init()
+        (d / "team.toml").write_text((d / "team.toml").read_text() + '\n[agents]\nresume = "yes"\n')
+        team.CFG = None
+        with self.assertRaisesRegex(ValueError, "resume must be true or false"):
+            team.init(d / "team.toml")
+
     def test_bad_mcp_mode_is_refused(self):
         d = self.init()
         (d / "team.toml").write_text((d / "team.toml").read_text() + '\n[agents]\nmcp = "some"\n')

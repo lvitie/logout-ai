@@ -1,5 +1,6 @@
 """End-to-end pipeline runs through `advance` with a scripted fake claude: happy path, gate and approve, minor-round
-escalation, redo and drop, approve while queued, and a stage killed mid-run then resumed. Run with python3 -I."""
+escalation, redo and drop, approve while queued, a stage killed mid-run then resumed, and resumed agent sessions.
+Run with python3 -I."""
 import json
 import os
 import subprocess
@@ -14,16 +15,19 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tests"))
 import teamcfg  # noqa: E402
 from cfgutil import TOML  # noqa: E402
+from team import RESUME_LINE  # noqa: E402
 
 
 ROUTE = "Spec.\nTITLE: thing\nROUTE: complex\nDOMAIN: gameplay\nRISK: low\nSIZE: small\n"
 DONE, PASS = "Did it.\nSTATUS: DONE\n", "Fine.\nVERDICT: PASS\n"
+FIXED = "Fixed the nit.\nSTATUS: DONE\n"
 MINOR = "Nit.\nSEVERITY: minor\nVERDICT: FAIL\n"
 HAPPY = [ROUTE, DONE, PASS, DONE, PASS]  # route, plan, plan_review, implement, review
 
 
 class EndToEnd(unittest.TestCase):
-    """A temp git project whose fake claude answers each launch with the next scripted reply (rN files)."""
+    """A temp git project whose fake claude answers each launch with the next scripted reply (rN files) and saves
+    that launch's argv (argsN, one per line) and prompt (inN)."""
 
     def setUp(self):
         tmp = tempfile.TemporaryDirectory()
@@ -34,7 +38,8 @@ class EndToEnd(unittest.TestCase):
             d.mkdir()
         r = self.replies
         (self.fake / "claude").write_text(
-            f"#!/bin/sh\ncat >/dev/null\nn=$(($(cat {r}/count 2>/dev/null || echo 0) + 1)); echo $n > {r}/count\n"
+            f"#!/bin/sh\nn=$(($(cat {r}/count 2>/dev/null || echo 0) + 1)); echo $n > {r}/count\n"
+            f"cat > {r}/in$n\nprintf '%s\\n' \"$@\" > {r}/args$n\n[ -f {r}/r$n.fail ] && exit 1\n"
             f"[ -f {r}/r$n.hang ] && echo $$ > {r}/pid && exec sleep 300\ncat {r}/r$n 2>/dev/null || exit 99\n")
         (self.fake / "codex").write_text("#!/bin/sh\nexit 99\n")
         for name in ("claude", "codex"):
@@ -56,12 +61,26 @@ class EndToEnd(unittest.TestCase):
         subprocess.run(["git", *a], cwd=self.proj, env=self.env, capture_output=True, text=True, check=True)
 
     def script(self, *texts, hang=False):
-        """Queue the next fake claude replies; hang: the first of them sleeps until killed instead."""
+        """Queue the next fake claude replies; hang: the first of them sleeps until killed instead. A None reply
+        fails at once with no output (a CLI that cannot resume the session)."""
         for i, text in enumerate(texts):
             self.n += 1
+            if text is None:
+                (self.replies / f"r{self.n}.fail").touch()
+                continue
             (self.replies / f"r{self.n}").write_text(json.dumps({"type": "result", "result": text}) + "\n")
             if hang and i == 0:
                 (self.replies / f"r{self.n}.hang").touch()
+
+    def call(self, n):
+        """(argv, prompt) of fake claude launch n."""
+        return (self.replies / f"args{n}").read_text().splitlines(), (self.replies / f"in{n}").read_text()
+
+    def session(self, n):
+        """('--session-id' or '--resume', id) of launch n."""
+        args = self.call(n)[0]
+        flag = next(a for a in args if a in ("--session-id", "--resume"))
+        return flag, args[args.index(flag) + 1]
 
     def team(self, *a):
         r = subprocess.run([sys.executable, "-I", str(ROOT / "team.py"), *a], cwd=self.proj, env=self.env,
@@ -162,6 +181,55 @@ class EndToEnd(unittest.TestCase):
         s = self.state()
         self.assertEqual((s["status"], s["stage"]), ("done", 4))
         self.assertEqual(len(s["history"]), 5)
+
+    def test_retry_and_re_review_resume_their_sessions(self):
+        self.script(ROUTE, DONE, PASS, DONE, MINOR, FIXED, PASS)  # 4 implement, 5 review, 6 retry, 7 re-review
+        self.team("new", "picky once")
+        s = self.state()
+        self.assertEqual((s["status"], s["n"]), ("done", 7))
+        impl, rev = self.session(4), self.session(5)
+        self.assertEqual([impl[0], rev[0]], ["--session-id", "--session-id"])
+        self.assertEqual(self.session(6), ("--resume", impl[1]))
+        self.assertEqual(self.session(7), ("--resume", rev[1]))
+        retry, rereview = self.call(6)[1], self.call(7)[1]
+        for text in (retry, rereview):
+            self.assertTrue(text.startswith(RESUME_LINE))
+            self.assertNotIn("## Request", text)
+            self.assertIn("## Job", text)
+        self.assertIn("Nit.", retry)  # the new findings
+        self.assertNotIn("Did it.", retry)  # its own report is in its context
+        self.assertIn("Fixed the nit.", rereview)  # the new report; its own findings are already in its context
+        self.assertNotIn("## Earlier findings", rereview)
+        self.assertIn("## Request", self.call(4)[1])
+        self.assertEqual([x["resumed"] for x in s["launches"][3:]], [False, False, True, True])
+        self.assertNotIn("sessions", s)  # done: a redo starts new sessions
+
+    def test_gate_resumes_unless_the_model_changed(self):
+        self.script(ROUTE, "STATUS: GATE pick\n", "STATUS: GATE again\n")
+        self.team("new", "gated")
+        self.team("approve", "t001", "use A")
+        self.assertEqual(self.session(3), ("--resume", self.session(2)[1]))
+        self.assertIn("use A", self.call(3)[1])
+        s = self.state()
+        (key,) = s["sessions"]
+        s["sessions"][key]["model"] = "an-older-model"  # as after an escalation to another tier
+        (self.proj / ".agent-team/t001/state.json").write_text(json.dumps(s))
+        self.script(DONE, PASS, DONE, PASS)
+        self.team("approve", "t001", "go")
+        self.assertEqual(self.session(4)[0], "--session-id")
+        self.assertIn("## Request", self.call(4)[1])
+        self.assertEqual(self.state()["status"], "done")
+
+    def test_refused_resume_falls_back_to_a_fresh_session(self):
+        self.script(ROUTE, DONE, PASS, DONE, MINOR, None, FIXED, PASS)  # 6: the resumed retry fails at startup
+        self.team("new", "pruned session")
+        s = self.state()
+        self.assertEqual(s["status"], "done")
+        self.assertEqual(self.session(6)[0], "--resume")
+        self.assertEqual(self.session(7)[0], "--session-id")
+        self.assertIn("## Request", self.call(7)[1])
+        self.assertEqual(self.session(8), ("--resume", self.session(5)[1]))
+        self.assertIn("resume failed, fresh session", (self.proj / ".agent-team/live.log").read_text())
 
 
 if __name__ == "__main__":

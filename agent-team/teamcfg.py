@@ -39,7 +39,8 @@ DEFAULTS = {
                 "docs": ["AGENTS.md", "SPEC.md", "ROADMAP.md", "TASKS.md", "docs/"],
                 "queue_file": "queue.txt", "planning_file": "TASKS.md"},
     "vcs": {"kind": "git", "guard_names": ["git"], "deny": {}, "deny_flags": {}},
-    "agents": {"deny_extra": [], "mcp": "write", "user_skills": False, "codex_sandbox": "workspace-write"},
+    "agents": {"deny_extra": [], "mcp": "write", "user_skills": False, "codex_sandbox": "workspace-write",
+               "resume": True},
     "locks": {"names": [], "default": []},
     "routing": {"max_rounds": 2, "max_parallel": 3, "long_stage_min": 120, "domains": ["code"], "review_extra_domains": [],
                 "extra_review_role": "", "extra_review_routes": [], "domain_roles": {}, "domain": {},
@@ -122,6 +123,8 @@ def load(path=None):
     cfg["roles"] = roles
     if cfg["agents"]["mcp"] not in MCP_MODES:
         raise ValueError(f"team.toml [agents] mcp must be one of {', '.join(MCP_MODES)}")
+    if not isinstance(cfg["agents"]["resume"], bool):
+        raise ValueError("team.toml [agents] resume must be true or false")
     if cfg["agents"]["codex_sandbox"] not in CODEX_SANDBOXES:
         raise ValueError(f"team.toml [agents] codex_sandbox must be one of {', '.join(CODEX_SANDBOXES)}")
     pipes = cfg["routing"]["pipeline"]

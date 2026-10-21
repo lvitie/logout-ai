@@ -27,6 +27,7 @@ mcp = "write"                 # Claude runs: user MCP servers load in "all" stag
                               # server's tools are re-sent every turn (read-only stage: ~82k tokens with them, ~6k without)
 user_skills = false           # true: also load the user's own Claude skills/slash commands (--disable-slash-commands otherwise)
 codex_sandbox = "workspace-write"  # "user": Codex writers follow your ~/.codex/config.toml instead of -s workspace-write
+resume = true                 # retries and re-reviews continue their CLI session and get only what changed
 
 [locks]                       # shared resources an agent leases only while using one (`team lock`/`team unlock`)
 names = ["editor", "gpu", "build"]  # editor = the project editor; gpu = GPU-heavy captures or renders; build = cooks/packaging

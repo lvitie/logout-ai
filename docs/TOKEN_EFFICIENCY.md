@@ -102,7 +102,7 @@ Not re-fetched in this task (no web access was used); check the pages before rel
 
 1. `Compare quality after the token changes: first-pass review pass rate, review/plan rounds, escalations over the next 10 tasks against the baseline in docs/TOKEN_EFFICIENCY.md (team tokens)`
 2. `Cut plan_review first-pass failures (13 of 16 failed): read the failed plan reviews, tighten the plan job/spec template so the first plan passes, keep the review bar`
-3. `Resume the same Claude session for the fix -> re-review loop (--resume) instead of a cold start, measure input and quality`
+3. Done: work and review stages resume their session across rounds (`[agents] resume`, docs/AGENT_TEAM.md). Still to do: `Measure input tokens and review quality of resumed rounds against the baseline (team tokens)`
 4. `Codex stages: measure with team tokens after 20+ Codex runs, then decide on MCP/config trimming and reasoning effort per stage`
 5. `Inline small changes.diff (under ~3k chars) in review prompts instead of the changed-files list; measure tool calls and turns`
 6. `Add a per-task token budget to team.toml with a live.log warning when a stage runs over N turns`

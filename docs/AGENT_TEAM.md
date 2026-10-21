@@ -270,6 +270,13 @@ profiles, the `# --- ladder` rows and, for `git`/`none`, the `[vcs]` block.
   `[agents].user_skills` (default false): load the user's own skills/slash commands. See `docs/TOKEN_EFFICIENCY.md`.
   `[agents].codex_sandbox` (`workspace-write` default, `user`): `user` drops `-s workspace-write` for Codex writers so
   they follow the user's own `$CODEX_HOME/config.toml` (needed for editors, containers, GPU); read-only stages stay `-s read-only`.
+  `[agents].resume` (default true): the plan, plan_review, implement, plan_implement and review stages continue the
+  CLI session their kind and agent last ran on (`state.json` `sessions`, Claude `--session-id`/`--resume`, Codex
+  `exec resume`) while the cli and model stay the same; a step to another tier, a takeover or a usage swap starts
+  fresh. A resumed round gets one line, then only the prompt sections that changed since that session last saw them
+  (new findings, report, notes, diagnosis), then the job. A resume the CLI refuses before any output is retried once
+  fresh (`resume failed, fresh session` in `live.log`). Done and dropped tasks clear their sessions. Set false if
+  resumed reviewers anchor on their earlier view.
 - `[locks]`: `names` are shared resources (editor, GPU, build) that an agent leases only while it uses one:
   implement stages get the rule and the exact commands, `team lock <name> [--wait S]` before starting it (exit 3
   while another task or `team hold` has it) and `team unlock <name>` as soon as it stops. A lease lives in
@@ -292,7 +299,7 @@ profiles, the `# --- ladder` rows and, for `git`/`none`, the `[vcs]` block.
   names are the agent files plus the `[roles]` keys; a key without a file gets the generic prompt line. An agent
   without a `[roles]` entry runs on the route's role for that stage (cli, model, effort). `producer`, `mid`, `senior`,
   `architect`, `director` ship as bundled generic agents. Each launch is recorded in the task state (`launches`: stem
-  `NN-kind-<agent>`, agent, profile, cli, model, effort) before it starts. Without `[heuristic]` the frontmatter `model`
+  `NN-kind-<agent>`, agent, profile, cli, model, effort, and for resumable stages `session` and `resumed`) before it starts. Without `[heuristic]` the frontmatter `model`
   and `effort` are exact; with it they are a floor (see below), and `pin = true` makes them exact again.
 - `[heuristic]` (optional, the model/effort heuristic): `[heuristic.tiers]` is the ladder, weakest first, each tier
   naming a `[roles]` profile per cli (`low = { claude = "mid", codex = "mid_codex" }`; the shipped ladder is in `docs/MODEL_LADDER.md`; a tier may have one cli).

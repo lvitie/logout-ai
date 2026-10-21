@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Agent team coordinator: runs Claude and Codex agents one at a time per task. Config: team.toml (see docs/AGENT_TEAM.md)."""
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -14,6 +15,7 @@ import time
 import tomllib
 import urllib.error
 import urllib.request
+import uuid
 from datetime import datetime
 from pathlib import Path
 
@@ -24,6 +26,8 @@ import tokens  # noqa: E402
 import vcs as vcsmod  # noqa: E402
 
 CLIP = 6000  # max chars of any hand-off inlined into a prompt
+RESUME_KINDS = ("plan", "plan_review", "implement", "plan_implement", "review")  # [agents] resume: rounds continue a session
+RESUME_LINE = "Next round of the same task; only what changed since your last turn follows."
 _usage = {"t": 0.0, "ok_t": 0.0, "fail": True, "low": False, "mode": "mixed"}  # ok_t: last good fetch
 H, P_MAX_X, WASTE, HIST_KEEP_S = 168.0, 2.5, 20.0, 72 * 3600
 CFG = WS = RUNS = LIVE = ROLES = AGENTS = VCS = HIST = MODE = ROUTE_LOCK = None
@@ -386,38 +390,63 @@ def lock_note():
             f"- as soon as you stop it: `{cmd} unlock <name>`. Your locks are freed anyway when the task's run ends.")
 
 
-def build_prompt(s, kind, agent, skills=()):
+def prompt_parts(s, kind, agent, skills=()):
+    """The prompt as [(key, text)] sections in order; a resumed session gets only the sections it has not seen."""
     d = task_dir(s["id"])
     probes = env_status()
-    parts = [role_text(agent), agent_skills_table(agent, skills) if kind not in ("route", "refill") else "",
-             fmt(teamcfg.template(CFG, "roles/common.md")),
-             fmt(teamcfg.template(CFG, f"vcs/{CFG['vcs']['kind']}.md")),
-             lock_note() if is_impl(kind) else "",
-             f"Task {s['id']} | {noun()} {s['change']} | folder {d} | {s.get('route')}/{s.get('domain')}"
-             + (f" | {probes}" if probes else ""),
-             "## Request\n" + s["request"]]
-    parts = [p for p in parts if p]
-    parts += [f"## Skill: {n}\n{x}" for n, x in dict(skills).items()]
+    parts = [("role", role_text(agent)),
+             ("skills", agent_skills_table(agent, skills) if kind not in ("route", "refill") else ""),
+             ("common", fmt(teamcfg.template(CFG, "roles/common.md"))),
+             ("vcs", fmt(teamcfg.template(CFG, f"vcs/{CFG['vcs']['kind']}.md"))),
+             ("locks", lock_note() if is_impl(kind) else ""),
+             ("task", f"Task {s['id']} | {noun()} {s['change']} | folder {d} | {s.get('route')}/{s.get('domain')}"
+              + (f" | {probes}" if probes else "")),
+             ("request", "## Request\n" + s["request"])]
+    parts = [p for p in parts if p[1]]
+    parts += [(f"skill:{n}", f"## Skill: {n}\n{x}") for n, x in dict(skills).items()]
     for label, key in (("Spec", "spec"), ("Plan", "plan"), ("Report", "report")):
         if s.get(key) and kind != "route" and not (key == "plan" and s.get("plan") == s.get("report")):  # plan_implement: one handoff
-            parts.append(f"## {label}\n" + body(Path(s[key]).read_text()))
+            parts.append((key, f"## {label}\n" + body(Path(s[key]).read_text())))
     if kind == "review" and (summary := diff_summary(d / "changes.diff")):
-        parts.append(f"## Changed files ({d / 'changes.diff'})\n" + summary)
+        parts.append(("changed", f"## Changed files ({d / 'changes.diff'})\n" + summary))
     feedback = s["plan_reviews"] + (s["reviews"] if kind == "plan" else []) if kind in ("plan", "plan_review") else s["reviews"]
     if kind != "route":
-        parts += [f"## Earlier findings ({Path(r).stem})\n" + body(Path(r).read_text()) for r in feedback]
+        parts += [(f"findings:{Path(r).stem}", f"## Earlier findings ({Path(r).stem})\n" + body(Path(r).read_text()))
+                  for r in feedback]
     if kind != "route" and s.get("diagnose") == kind:
-        parts.append("## Diagnosis required\nA reviewer rated the last failure critical or recommended escalation. Before "
-                     "changing anything, state the root cause and why the earlier attempt missed it, then fix that.")
+        parts.append(("diagnose", "## Diagnosis required\nA reviewer rated the last failure critical or recommended "
+                      "escalation. Before changing anything, state the root cause and why the earlier attempt missed it, "
+                      "then fix that."))
     if not is_impl(kind) and CFG["prompts"]["readonly_note"]:
-        parts.append(CFG["prompts"]["readonly_note"])
+        parts.append(("readonly", CFG["prompts"]["readonly_note"]))
     if s["notes"]:
-        parts.append("## User notes\n" + "\n".join(f"- {n}" for n in s["notes"]))
+        parts.append(("notes", "## User notes\n" + "\n".join(f"- {n}" for n in s["notes"])))
     job = fmt(teamcfg.template(CFG, f"jobs/{kind}.md"))
     if kind == "route":
         job = job.replace("{skills}", "\n".join(f"- {n}: {x}" for n, x in teamcfg.list_skills(CFG).items()) or "(none)")
-    parts.append("## Job\n" + job)
-    return "\n\n".join(parts)
+    parts.append(("job", "## Job\n" + job))
+    return parts
+
+
+def build_prompt(s, kind, agent, skills=()):
+    return "\n\n".join(t for _, t in prompt_parts(s, kind, agent, skills))
+
+
+def section_hashes(parts):
+    return {k: hashlib.sha1(t.encode()).hexdigest()[:12] for k, t in parts}
+
+
+def own_sections(kind, stem, text):
+    """The prompt sections a stage's own output becomes in later rounds: its session has them in context already."""
+    if kind in ("review", "plan_review"):
+        return [(f"findings:{stem}", f"## Earlier findings ({stem})\n" + body(text))]
+    return [("plan" if kind == "plan" else "report", f"## {'Plan' if kind == 'plan' else 'Report'}\n" + body(text))]
+
+
+def resume_prompt(parts, seen):
+    """A resumed round: the sections whose text changed since the session last saw them, then the job."""
+    new = [t for k, t in parts if k != "job" and seen.get(k) != section_hashes([(k, t)])[k]]
+    return "\n\n".join([RESUME_LINE, *new, parts[-1][1]])
 
 
 def summarize(cli, ev):
@@ -463,7 +492,9 @@ def deny_rules():
     return rules + [f"Bash({c}:*)" for c in CFG["agents"]["deny_extra"]]
 
 
-def agent_cmd(cli, model, effort, readonly, out):
+def agent_cmd(cli, model, effort, readonly, out, session=None, resume=False):
+    """The CLI argv for one stage. session: the Claude session id to create (or, with resume, the Claude session or
+    Codex thread to continue); a fresh Codex run reports its thread id in its events."""
     if cli == "claude":
         py = f'"{Path(sys.executable).as_posix()}"'
         hook = f'{py} "{(HERE / "hooks/vcs_open.py").as_posix()}"'
@@ -487,18 +518,23 @@ def agent_cmd(cli, model, effort, readonly, out):
             cmd += ["--strict-mcp-config"]
         if not CFG["agents"]["user_skills"]:
             cmd += ["--disable-slash-commands"]
+        if session:
+            cmd += ["--resume" if resume else "--session-id", session]
         return cmd
-    cmd = ["codex", "exec", "-m", model, "-c", f'model_reasoning_effort="{effort}"', "-C", str(WS),
-           "--skip-git-repo-check", "--json", "-o", str(out)]  # Perforce and other non-git workspaces
+    # `exec resume` has no -C (Popen runs in WS anyway) and no -s (the sandbox goes in as sandbox_mode)
+    cmd = ["codex", "exec", *(["resume"] if resume else []), "-m", model, "-c", f'model_reasoning_effort="{effort}"',
+           *([] if resume else ["-C", str(WS)]), "--skip-git-repo-check", "--json", "-o", str(out)]  # Perforce and other non-git workspaces
     if CFG["agents"]["mcp"] == "none" or (readonly and CFG["agents"]["mcp"] == "write"):
         cmd += codex_mcp_off()
     if not readonly and VCS.sandbox_network:  # p4 edit/add must reach the server from the sandbox
         cmd += ["-c", "sandbox_workspace_write.network_access=true"]
     # workspace-write keeps writes inside the workspace and .git read-only, whatever the user's Codex config says;
     # [agents] codex_sandbox = "user" lets writers use the user's own Codex config (editors, containers, GPU)
+    tail = [session, "-"] if resume else ["-"]
     if not readonly and CFG["agents"]["codex_sandbox"] == "user":
-        return cmd + ["-"]
-    return cmd + ["-s", "read-only" if readonly else "workspace-write", "-"]
+        return cmd + tail
+    mode = "read-only" if readonly else "workspace-write"
+    return cmd + (["-c", f'sandbox_mode="{mode}"'] if resume else ["-s", mode]) + tail
 
 
 
@@ -922,6 +958,8 @@ def _assignment(ctx, role, burst):
 
 
 def _run_agent_once(s, kind, agent, role, burst, ctx=None):
+    """One launch. A work or review stage continues the session its kind/agent pair last ran on the same cli and model
+    ([agents] resume), sending only the prompt sections that changed; a resume the CLI refuses starts fresh once."""
     name, cli, model, effort = ROLES[role]
     if ctx and ctx.get("h"):  # the tiered profile decides cli, model and effort
         cli, model, effort, _ = _assignment(ctx, role, burst)
@@ -943,6 +981,12 @@ def _run_agent_once(s, kind, agent, role, burst, ctx=None):
     s["n"] += 1
     stem = f"{s['n']:02d}-{kind}-{agent}"
     launch = {"stem": stem, "agent": agent, "profile": role, "cli": cli, "model": model, "effort": effort}
+    key = f"{kind}/{agent}" if CFG["agents"]["resume"] and kind in RESUME_KINDS else None
+    prev = (s.get("sessions") or {}).get(key) if key else None
+    resume = bool(prev and prev["cli"] == cli and prev["model"] == model)
+    sid = prev["id"] if resume else (str(uuid.uuid4()) if key and cli == "claude" else None)
+    if key:
+        launch.update(session=sid, resumed=resume)
     if ctx:
         launch["heuristic"] = dict(ctx["record"])  # inputs, rules, tier and assignment: audited, and a resume reuses its tier
     s.setdefault("launches", []).append(launch)  # saved before the launch: readers see what runs now
@@ -952,7 +996,8 @@ def _run_agent_once(s, kind, agent, role, burst, ctx=None):
     raw.parent.mkdir(exist_ok=True)
     if kind not in ("route", "refill"):
         write_snapshot(s)
-    text = build_prompt(s, kind, agent, skills)
+    parts = prompt_parts(s, kind, agent, skills)
+    text = resume_prompt(parts, prev["seen"]) if resume else "\n\n".join(t for _, t in parts)
     (d / "logs" / f"{stem}.prompt.md").write_text(text)
     ensure_guards()
     env = dict(os.environ, TEAM_TASK=s["id"], TEAM_CHANGE=str(s["change"]), TEAM_ROLE=agent, TEAM_STAGE=stem,
@@ -963,15 +1008,16 @@ def _run_agent_once(s, kind, agent, role, burst, ctx=None):
             env[f"TEAM_REAL_{tool.upper()}"] = real
         else:
             env.pop(f"TEAM_REAL_{tool.upper()}", None)
-    cmd = teamcfg.command(agent_cmd(cli, model, effort, not is_impl(kind), out), path=env["PATH"])
+    cmd = teamcfg.command(agent_cmd(cli, model, effort, not is_impl(kind), out, sid, resume), path=env["PATH"])
 
     if ctx:
         r = ctx["record"]
         live(f"[{s['id']}] heuristic {kind}: {r.get('tier_final') or r.get('tier') or r['decided_by']} via {r['decided_by']}"
              f" (rules: {', '.join(r['rules']) or 'none'}) -> {r['assigned']} {cli} {model} {effort}"
              + "".join(f"; {n}" for n in r.get("notes", [])))
-    live(f"[{s['id']}] {name} ({model}, {effort}): {kind}")
-    final = timer = None
+    live(f"[{s['id']}] {name} ({model}, {effort}): {kind}" + (" (resumed)" if resume else ""))
+    final = timer = got = None
+    spoke = False  # any assistant output: a failed resume without it is retried fresh
     untracked = []  # Codex edits that could not join the task's change
     session = {} if os.name == "nt" else {"start_new_session": True}  # its own process group, reaped as a whole
     with raw.open("w") as rawf, subprocess.Popen(cmd, cwd=WS, env=env, text=True, stdin=subprocess.PIPE,
@@ -994,6 +1040,9 @@ def _run_agent_once(s, kind, agent, role, burst, ctx=None):
                     live(f"[{name}] {msg[:600]}")
                 if result is not None:
                     final = result
+                if isinstance(ev, dict):
+                    got = ev.get("thread_id") if ev.get("type") == "thread.started" else ev.get("session_id") or got
+                    spoke = spoke or ev.get("type") in ("assistant", "item.completed")
                 if cli == "codex" and is_impl(kind) and isinstance(ev, dict):
                     untracked += track_codex_edits(s, ev)
                 if timer is None and (result is not None or (isinstance(ev, dict) and ev.get("type") == "turn.completed")):
@@ -1013,8 +1062,17 @@ def _run_agent_once(s, kind, agent, role, burst, ctx=None):
         out.write_text(final or "")
     text = out.read_text() if out.exists() else ""
     if rc != 0 or not text.strip():
+        if resume and not spoke:  # the CLI could not continue the session (pruned, expired): start over once
+            live(f"[{s['id']}] resume failed, fresh session")
+            s["sessions"].pop(key)
+            return _run_agent_once(s, kind, agent, role, burst, ctx)
         s["status"], s["reason"] = "failed", f"{name} exited {rc} with no result; see {raw}"
         return None, None
+    if key and (got or sid):
+        seen = dict(prev["seen"]) if resume else {}
+        s.setdefault("sessions", {})[key] = {"cli": cli, "model": model, "id": got or sid,
+                                             "seen": seen | section_hashes(parts + own_sections(kind, stem, text))}
+        launch["session"] = got or sid
     if untracked:  # the change would silently miss these files: the user resolves it (e.g. a lock), then approves
         s["status"], s["reason"] = "blocked", f"{name} changed files that are not in {noun()} {s['change']}: " + \
             "; ".join(untracked)[:500]
@@ -1421,6 +1479,7 @@ def advance(s, from_queue=False):
                                                          else f"Review the {noun()} (`team review {s['id']}`).")
                     s["finished"] = time.time()
                     s.setdefault("first_finish", s["finished"])  # `finished` moves on a redo; this one does not
+                    s.pop("sessions", None)  # a redo starts new sessions
                 else:
                     step(s, stages)
             if s["status"] == "running" and s["stage"] != previous_stage and stage_label(s) != "end":
@@ -2121,6 +2180,7 @@ def cmd_drop(a):
     s["notes"].append("Dropped by the user" + (f": {a.note}" if a.note else ""))
     s["status"], s["reason"] = "dropped", a.note or "dropped"
     s["finished"] = time.time()
+    s.pop("sessions", None)
     save(s)
     print(f"{a.id} dropped.")
 
