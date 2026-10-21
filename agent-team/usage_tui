@@ -2,15 +2,19 @@
 """Small usage panel for the team dashboard: Codex rate limits (real, from rollout logs),
 Claude token use over 5 h / 7 d (local estimate from transcripts) and team spend from live.log.
 Reads $CODEX_HOME/sessions and $CLAUDE_CONFIG_DIR/projects; never auth.json. The Claude plan endpoint (which uses
-Claude Code's OAuth token) is used only when team.toml [usage] claude_endpoint = true."""
+Claude Code's OAuth token) is used only when team.toml [usage] claude_endpoint = true. [usage] extra_module adds a
+project's own rows (see extra_module())."""
 import glob
+import importlib.util
 import json
 import os
 import queue
 import re
+import shutil
 import subprocess
 import threading
 import time
+import types
 import sys
 import urllib.request
 from datetime import datetime, timezone
@@ -27,6 +31,14 @@ def bar(pct, width=24):
     col = G if pct < 60 else Y if pct < 85 else R
     n = round(width * pct / 100)
     return f"{col}{'█' * n}{D}{'░' * (width - n)}{X} {col}{pct:5.1f}%{X}"
+
+
+def compact_row(name, period, pct, reset, width=12):
+    pct = max(0.0, min(100.0, pct))
+    col = G if pct < 60 else Y if pct < 85 else R
+    n = round(width * pct / 100)
+    when = until(reset) if reset > time.time() else "expired"
+    return f"{name:<7}{period:>2} {col}{'█' * n}{D}{'░' * (width - n)}{X} {col}{pct:3.0f}%{X} {when}"
 
 
 def human(n):
@@ -348,8 +360,61 @@ def team_spend():
     return total, runs
 
 
-def draw():
-    out = ["\033[H\033[J" + f"{C}USAGE{X}  {D}{datetime.now():%H:%M:%S}{X}"]
+
+def extra_module(cfg):
+    """[usage] extra_module: optional project Python file (path relative to the root) with rows(cfg, compact) ->
+    [(drop_tier, line)] and json(cfg, timeout) -> dict; it gets this module's namespace as `ui`. None when unset."""
+    path = cfg["usage"].get("extra_module")
+    if not path:
+        return None
+    spec = importlib.util.spec_from_file_location("usage_extra", os.path.join(str(cfg["root"]), path))
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    mod.ui = types.SimpleNamespace(**globals())
+    return mod
+
+
+def _extra():
+    try:
+        cfg = teamcfg.load()
+        return cfg, extra_module(cfg)
+    except (SystemExit, Exception):  # no config or a broken module: panel and --json go on without it
+        return None, None
+
+
+def wrap_display(line, columns):
+    """Wrap panel text without counting ANSI colour/cursor sequences as columns."""
+    rows, row, width = [], "", 0
+    for token in re.findall(r"\x1b\[[0-9;]*[A-Za-z]|[^\x1b]", line):
+        if not token.startswith("\x1b"):
+            if width >= max(1, columns):
+                rows.append(row)
+                row, width = "", 0
+            width += 1
+        row += token
+    return "\n".join([*rows, row])
+
+
+BORDER = 2  # rows a zellij pane border may take from shutil's line count
+MIN_BAR_ROWS = 6  # header + the weekly bars that are never dropped
+
+
+def fit_rows(rows, usable, columns):
+    """rows: (drop_tier, line); tier 0 is never dropped. Drop tier 1, 2, 3, 4 in order until it fits."""
+    def height(rs):
+        return sum(wrap_display(line, columns).count("\n") + 1 for _, line in rs)
+    for tier in (1, 2, 3, 4):
+        if height(rows) <= usable:
+            break
+        rows = [r for r in rows if r[0] != tier]
+    return rows if height(rows) <= usable else None
+
+
+def draw(compact=None):
+    size = shutil.get_terminal_size()
+    usable = size.lines - BORDER
+    compact = compact or size.columns < 60 or usable < MIN_BAR_ROWS
+    out = [(0, "\033[H\033[J" + f"{C}USAGE{X}  {D}{datetime.now():%H:%M:%S}{X}")]
     rl, ts = codex()
     if rl:
         for name in ("primary", "secondary"):
@@ -357,25 +422,43 @@ def draw():
             if w:
                 mins = w.get("window_minutes", 0)
                 label = f"{mins // 1440}d" if mins >= 1440 else f"{mins // 60}h"
-                out.append(f"Codex  {label:>3} {bar(w.get('used_percent', 0))}  resets {until(w.get('resets_at', 0))}")
+                pct, reset = w.get("used_percent", 0), w.get("resets_at", 0)
+                out.append((0 if mins >= 1440 else 4, compact_row("Codex", label, pct, reset) if compact
+                            else f"Codex  {label:>3} {bar(pct)}  resets {until(reset)}"))
         if rl.get("rate_limit_reached_type"):
-            out.append(f"{R}Codex limit reached: {rl['rate_limit_reached_type']}{X}")
+            out.append((0, f"{R}Codex limit reached: {rl['rate_limit_reached_type']}{X}"))
     else:
-        out.append(f"{D}Codex: no rate-limit data yet{X}")
+        out.append((0, f"{D}Codex: no rate-limit data yet{X}"))
     n, how, _ = codex_resets()
     if n is not None:
-        out.append(f"Codex resets left: {G}{n}{X} {D}({how}){X}")
+        out.append((2, f"Codex resets left: {G}{n}{X} {D}({how}){X}"))
     w, src = claude_plan()
     for label, pct, reset in (w or []):
-        out.append(f"Claude {label:>3} {bar(pct)}  resets {until(reset)}")
+        provider = "Claude"
+        if " " in label:  # a model-scoped window ("7d Fable") is shown as its own provider row: "Fable 7d"
+            label, provider = label.split(" ", 1)
+        out.append((0, compact_row(provider, label, pct, reset) if compact
+                    else f"{provider:<7}{label:>3} {bar(pct)}  resets {until(reset)}"))
     if not w:
-        out.append(f"{Y}Claude plan %: {src}{X}")
+        out.append((0, f"{Y}Claude plan %: {src}{X}"))
     c5, c7 = claude()
-    out.append(f"{D}Claude tokens 5h {human(c5)} / 7d {human(c7)} (local){X}")
     spend, runs = team_spend()
-    out.append(f"Team agents    {runs} runs, ${spend:,.2f} reported (Claude-side agents)")
-    print("\n".join(out), flush=True)
-
+    if compact:
+        out.append((0, f"{D}Claude tokens {human(c5)}/{human(c7)} 5h/7d; team {runs} runs ${spend:,.2f}{X}"))
+    else:
+        out.append((3, f"{D}Claude tokens 5h {human(c5)} / 7d {human(c7)} (local){X}"))
+    cfg, extra = _extra()
+    if extra:
+        try:
+            out.extend(extra.rows(cfg, compact=compact))
+        except Exception as e:  # a project module must not take the panel down
+            out.append((1, f"{D}extra usage: {type(e).__name__}{X}"))
+    if not compact:
+        out.append((3, f"Team agents    {runs} runs, ${spend:,.2f} reported (Claude-side agents)"))
+        out = fit_rows(out, usable, size.columns)
+        if out is None:  # even the bare bars do not fit
+            return draw(compact=True)
+    print("\n".join(wrap_display(line, size.columns) for _, line in out), flush=True)
 
 if __name__ == "__main__":
     if "--json" in sys.argv:  # for team.py: {"5h": pct, "7d": pct, ...} or {} when unknown
@@ -406,6 +489,12 @@ if __name__ == "__main__":
             _, _, exp_h = codex_resets(deadline)
             if exp_h is not None:
                 out["codex_reset_exp_h"] = exp_h
+        except Exception:
+            pass
+        cfg, extra = _extra()
+        try:
+            if extra:
+                out.update(extra.json(cfg, timeout=max(0, deadline - time.monotonic())))
         except Exception:
             pass
         print(json.dumps(out))

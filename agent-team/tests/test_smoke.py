@@ -179,6 +179,46 @@ class Project(unittest.TestCase):
         self.until_status("t002", "failed")
         self.assertEqual(self.state("t001")["status"], "new")
 
+    def test_hold_reserves_locks_until_release(self):
+        st = self.proj / ".agent-team"
+        self.team("new", "--no-run", "needs the editor")
+        self.set_state("t001", queued=True)
+        self.assertIn("no active hold", self.team("release", ok=False).stderr)
+        holder = subprocess.Popen([sys.executable, "-I", str(ROOT / "team.py"), "hold", "--res", "editor"],
+                                  cwd=self.proj, env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.addCleanup(holder.kill)
+        deadline = time.time() + 30
+        while "held for the user" not in (st / "live.log").read_text() if (st / "live.log").exists() else True:
+            self.assertLess(time.time(), deadline, "hold never took the editor lock")
+            time.sleep(0.2)
+        with (st / ".lock-editor").open("a") as f:
+            self.assertRaises(BlockingIOError, teamcfg.lock, f, False)
+        self.assertEqual(self.team("queue", "--once").stdout, "")  # held: not started
+        self.assertIn("already active", self.team("hold", ok=False).stderr)
+        self.assertIn("hold ends", self.team("release").stdout)
+        self.assertEqual(holder.wait(timeout=30), 0)
+        self.assertIn("hold: released", (st / "live.log").read_text())
+        self.assertFalse((st / "hold.json").exists())
+        (st / "hold.json").write_text('{"locks": ["editor"]}')  # stale: its process is gone
+        self.assertIn("started t001", self.team("queue", "--once").stdout)
+        self.until_status("t001", "failed")
+
+    def test_release_ends_a_hold_still_waiting_for_a_running_task(self):
+        st = self.proj / ".agent-team"
+        st.mkdir(exist_ok=True)
+        with (st / ".lock-editor").open("a") as busy:
+            teamcfg.lock(busy, blocking=False)  # stands in for a running task holding the editor
+            holder = subprocess.Popen([sys.executable, "-I", str(ROOT / "team.py"), "hold", "--res", "editor"],
+                                      cwd=self.proj, env=self.env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self.addCleanup(holder.kill)
+            deadline = time.time() + 30
+            while "waiting for 'editor'" not in ((st / "live.log").read_text() if (st / "live.log").exists() else ""):
+                self.assertLess(time.time(), deadline, "hold never started waiting")
+                time.sleep(0.2)
+            self.assertIn("hold ends", self.team("release").stdout)
+            self.assertEqual(holder.wait(timeout=15), 0)  # ends while the task still runs
+        self.assertIn("hold: released", (st / "live.log").read_text())
+
     def test_wait_reports_each_change_once(self):
         for request in ("broken", "finished"):
             self.team("new", "--no-run", request)
@@ -530,6 +570,14 @@ class Project(unittest.TestCase):
         args = argv_file.read_text().splitlines()
         self.assertEqual(args[args.index("-s") + 1], "workspace-write")
         self.assertIn("--skip-git-repo-check", args)  # Perforce workspaces are not git repos
+        cfg = (self.proj / "team.toml").read_text()
+        self.assertIn('codex_sandbox = "workspace-write"', cfg)
+        (self.proj / "team.toml").write_text(cfg.replace('codex_sandbox = "workspace-write"', 'codex_sandbox = "user"'))
+        self.team("run", "t001", ok=False)
+        self.assertNotIn("-s", argv_file.read_text().splitlines())  # the writer follows the user's Codex config
+        (self.proj / "team.toml").write_text(cfg.replace('codex_sandbox = "workspace-write"', 'codex_sandbox = "User"'))
+        with self.assertRaisesRegex(ValueError, "codex_sandbox must be one of"):
+            teamcfg.load(self.proj / "team.toml")
 
     def test_git_adapter(self):
         a = vcs.Git(self.proj)

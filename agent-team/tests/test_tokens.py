@@ -1,9 +1,10 @@
-"""`team tokens` log parsing, Claude launch flags that keep MCP/skills out of read-only stages, diff summary and prompt prefix
+"""`team tokens` log parsing, Claude/Codex launch flags that keep MCP/skills out of read-only stages, diff summary and prompt prefix
 stability. Run with python3 -I."""
 import json
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -91,6 +92,17 @@ class Flags(unittest.TestCase):
             self.assertEqual("--strict-mcp-config" in rw, rw_flag)
             self.assertEqual("--strict-mcp-config" in ro, mcp == "none")
             self.assertNotIn("--disable-slash-commands", ro)
+
+    def test_codex_read_only_stages_disable_mcp(self):
+        d = self.init()
+        home = d / "codex_home"
+        home.mkdir()
+        (home / "config.toml").write_text('[mcp_servers.my-srv]\ncommand = "x"\n[mcp_servers.other]\nurl = "http://h"\n')
+        with unittest.mock.patch.dict("os.environ", {"CODEX_HOME": str(home)}):
+            ro, rw = team.agent_cmd("codex", "m", "low", True, "o"), team.agent_cmd("codex", "m", "low", False, "o")
+        for arg in ("mcp_servers.my-srv.enabled=false", "mcp_servers.other.enabled=false", "features.apps=false"):
+            self.assertIn(arg, ro)
+            self.assertNotIn(arg, rw)
 
     def test_bad_mcp_mode_is_refused(self):
         d = self.init()

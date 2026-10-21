@@ -31,14 +31,15 @@ CLI_EFFORTS = {"claude": EFFORT_ORDER[1:], "codex": EFFORT_ORDER[:-1]}  # what e
 RISKS, SIZES = ("low", "medium", "high"), ("small", "medium", "large")
 HEURISTIC_STAGES = ("route",) + STAGE_KINDS
 USAGE_STATES = ("low", "claude", "codex", "mixed")  # [[heuristic.rule]] when.usage
-MCP_MODES = ("none", "write", "all")  # Claude runs: which stages load the user's MCP servers
+MCP_MODES = ("none", "write", "all")
+CODEX_SANDBOXES = ("workspace-write", "user")  # [agents] codex_sandbox: user = writers follow ~/.codex/config.toml  # Claude runs: which stages load the user's MCP servers
 CANONICAL_ROLES = ("producer", "mid", "senior", "architect", "director")
 DEFAULTS = {
     "project": {"name": "project", "root": ".", "state_dir": ".agent-team", "templates_dir": "", "team_setup": "",
                 "docs": ["AGENTS.md", "SPEC.md", "ROADMAP.md", "TASKS.md", "docs/"],
                 "queue_file": "queue.txt", "planning_file": "TASKS.md"},
     "vcs": {"kind": "git", "guard_names": ["git"], "deny": {}, "deny_flags": {}},
-    "agents": {"deny_extra": [], "mcp": "write", "user_skills": False},
+    "agents": {"deny_extra": [], "mcp": "write", "user_skills": False, "codex_sandbox": "workspace-write"},
     "locks": {"names": [], "default": []},
     "routing": {"max_rounds": 2, "max_parallel": 3, "long_stage_min": 120, "domains": ["code"], "review_extra_domains": [],
                 "extra_review_role": "", "extra_review_routes": [], "domain_roles": {}, "domain": {},
@@ -50,7 +51,7 @@ DEFAULTS = {
     "notify": {"review_cadence": "task", "review_cadence_rule": "", "app_name": "", "sound_dir": "",
                "sound_normal": "message.oga", "sound_urgent": "alarm-clock-elapsed.oga"},
     "probes": {},
-    "usage": {"claude_endpoint": False},
+    "usage": {"claude_endpoint": False, "extra_module": ""},
 }
 USAGE_DEFAULTS = {"claude_fallback": {}, "limits": {"5h": 90.0, "7d": 95.0}, "scoped_limit": {},
                   "surplus_swap": {}, "burst_swap": {}, "burst_file": "", "cheap_first": [],
@@ -121,6 +122,8 @@ def load(path=None):
     cfg["roles"] = roles
     if cfg["agents"]["mcp"] not in MCP_MODES:
         raise ValueError(f"team.toml [agents] mcp must be one of {', '.join(MCP_MODES)}")
+    if cfg["agents"]["codex_sandbox"] not in CODEX_SANDBOXES:
+        raise ValueError(f"team.toml [agents] codex_sandbox must be one of {', '.join(CODEX_SANDBOXES)}")
     pipes = cfg["routing"]["pipeline"]
     for alias, route in ROUTE_ALIASES.items():  # direct is canonical, simple the old name
         if route not in pipes and alias in pipes:
@@ -148,7 +151,20 @@ def load(path=None):
         if role not in roles:
             raise ValueError(f"team.toml {where} references unknown role {role!r}")
     _check_apex(cfg)
+    _check_scoped_limit(cfg)
     return cfg
+
+
+def _check_scoped_limit(cfg):
+    """[routing.usage.scoped_limit]: label + threshold; with role it diverts that role, without it guards the apex tier."""
+    sc = cfg["routing"]["usage"]["scoped_limit"]
+    if not sc:
+        return
+    if not isinstance(sc.get("label"), str) or not isinstance(sc.get("threshold"), (int, float)):
+        raise ValueError("team.toml [routing.usage.scoped_limit] needs label (a usage key) and threshold (percent)")
+    if not sc.get("role") and apex_rank(cfg["heuristic"]) is None:
+        raise ValueError("team.toml [routing.usage.scoped_limit] without role guards the apex tier: add an apex "
+                         "[heuristic.tiers] rank or name a role")
 
 
 def _light_routes(pipes):

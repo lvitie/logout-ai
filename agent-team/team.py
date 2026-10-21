@@ -11,6 +11,7 @@ import subprocess
 import sys
 import threading
 import time
+import tomllib
 import urllib.error
 import urllib.request
 from datetime import datetime
@@ -468,11 +469,30 @@ def agent_cmd(cli, model, effort, readonly, out):
         return cmd
     cmd = ["codex", "exec", "-m", model, "-c", f'model_reasoning_effort="{effort}"', "-C", str(WS),
            "--skip-git-repo-check", "--json", "-o", str(out)]  # Perforce and other non-git workspaces
+    if CFG["agents"]["mcp"] == "none" or (readonly and CFG["agents"]["mcp"] == "write"):
+        cmd += codex_mcp_off()
     if not readonly and VCS.sandbox_network:  # p4 edit/add must reach the server from the sandbox
         cmd += ["-c", "sandbox_workspace_write.network_access=true"]
-    # workspace-write keeps writes inside the workspace and .git read-only, whatever the user's Codex config says
+    # workspace-write keeps writes inside the workspace and .git read-only, whatever the user's Codex config says;
+    # [agents] codex_sandbox = "user" lets writers use the user's own Codex config (editors, containers, GPU)
+    if not readonly and CFG["agents"]["codex_sandbox"] == "user":
+        return cmd + ["-"]
     return cmd + ["-s", "read-only" if readonly else "workspace-write", "-"]
 
+
+
+def codex_mcp_off():
+    """-c overrides disabling every Codex MCP server for one run. Codex merges `-c mcp_servers={}` into the user's
+    table instead of replacing it and has no --strict-mcp-config, so each configured server gets enabled=false
+    (Codex splits the -c path on every dot and keeps quotes, so names are passed bare). features.apps=false also
+    drops the built-in ChatGPT apps connector server (codex_apps)."""
+    names = set()
+    for f in (Path(teamcfg.codex_home()) / "config.toml", WS / ".codex" / "config.toml"):
+        try:
+            names |= set(tomllib.loads(f.read_text()).get("mcp_servers", {}))
+        except (OSError, tomllib.TOMLDecodeError):
+            pass
+    return ["-c", "features.apps=false"] + [a for n in sorted(names) for a in ("-c", f"mcp_servers.{n}.enabled=false")]
 
 def reap(pid):
     """Kill what is left of an agent run. On POSIX the agent leads its own session, so its process group also holds
@@ -609,8 +629,9 @@ def claude_low():
         try:
             out = subprocess.run([sys.executable, str(HERE / "usage_tui"), "--json"], capture_output=True, text=True, timeout=30).stdout
             u = json.loads(out or "{}")
-            sc = U["scoped_limit"]  # a model-scoped weekly limit (own window) that diverts one role early
-            _usage["scoped_high"] = bool(sc) and u.get(sc["label"], 0) >= sc["threshold"]
+            sc = U["scoped_limit"]  # a model-scoped weekly limit (own window): diverts one role, or guards the apex tier
+            _usage["scoped_pct"] = u.get(sc["label"], 0) if sc else 0
+            _usage["scoped_high"] = bool(sc) and _usage["scoped_pct"] >= sc["threshold"]
             _usage["low"] = any(u.get(k, 0) >= v for k, v in U["limits"].items())
             _usage["mode"] = route_mode(u)
             _usage["ok_t"], _usage["fail"] = time.time(), False
@@ -640,6 +661,30 @@ def burst_active():
         return False
 
 
+def apex_guard(s, ctx, role, burst):
+    """[routing.usage.scoped_limit] without a role guards the apex tier's claude profile: while the scoped window is at
+    or above its threshold (unless a burst is active) or the Claude limits are reached, a stage stepped up to apex runs
+    the tier's codex profile instead (ctx["prefer"]), or, without one, returns why it goes to the user. `team approve`
+    on that hand-off lets the task spend the apex tier."""
+    sc, h = CFG["routing"]["usage"]["scoped_limit"], ctx.get("h") if ctx else None
+    top = teamcfg.apex_rank(h)
+    if not sc or sc.get("role") or top is None or ctx["rank"] != top or ctx["rank"] <= ctx["own"] or s.get("apex_approved"):
+        return None
+    t, cli = h["tiers"][top], ROLES[role][1]
+    if (t[cli] or t["codex" if cli == "claude" else "claude"])["cli"] != "claude":
+        return None
+    low = claude_low()
+    if not low and (burst or not _usage.get("scoped_high")):
+        return None
+    why = "Claude usage low" if low else f"{sc['label']} at {_usage.get('scoped_pct', 0):.0f}% >= {sc['threshold']:.0f}%"
+    if t["codex"]:
+        ctx["prefer"] = "codex"
+        live(f"[{s['id']}] apex guard ({why}): {t['claude']['role']} -> {t['codex']['role']} (Codex)")
+        return None
+    return (f"apex guard ({why}): the step up to {t['claude']['role']} needs the user; `team approve` spends it on this "
+            f"task, `team burst <hours>` lifts the guard")
+
+
 def ladder(s, kind):
     """The task's heuristic snapshot ({tiers, rules}), taken from the config at its first decision so that a later
     config edit cannot change a task in flight. None: no table (and the refill pseudo-task never uses one)."""
@@ -654,6 +699,12 @@ def run_agent(s, kind, agent, profile=None):
     ctx = None
     if h:
         agent, role, burst, ctx = _select_tiered(s, kind, agent, profile or agent, h)
+        why = apex_guard(s, ctx, role, burst)
+        if why:  # the apex tier is guarded and has no codex profile: the user decides
+            s["capped"], s["apex_guard"] = kind, True  # `team approve` retries at the apex tier
+            s["escalations"] = s.get("escalations", 0) + 1
+            s["status"], s["reason"] = "escalated", why
+            return None, None, agent, role
     else:
         agent, role, burst = _select_agent_role(s, kind, agent, profile or agent)
     capacity = CFG["routing"]["capacity_fallback"]  # a model reporting 503 / "at capacity" is retried on another role
@@ -751,10 +802,10 @@ def _swap_roles(s, kind, agent, role, ctx=None):
     # previous attempt failed.
     failed = s.get("failed") or s["plan_rounds"] >= 1 or s["review_rounds"] >= 1
     claude_low()  # refreshes _usage
-    surplus = _usage.get("mode") == "claude"  # Claude has the longer runway or is about to lose budget: spend it, save Codex
-    codex_first = _usage.get("mode") == "codex" and role in U["claude_fallback"]  # Codex has the longer runway
+    burst = burst_active()  # a user-requested burst spends Claude like a surplus
+    surplus = _usage.get("mode") == "claude" or burst  # Claude has the longer runway or is about to lose budget: spend it, save Codex
+    codex_first = _usage.get("mode") == "codex" and not burst and role in U["claude_fallback"]  # Codex has the longer runway
     cheap_first = role in U["cheap_first"] and not failed and not surplus
-    burst = burst_active()
     if surplus and not claude_low():  # swap Codex roles to Claude to conserve Codex
         swap = dict(U["surplus_swap"], **(U["burst_swap"] if burst else {}))
         new = _move(ctx, s, agent, role, swap[role]) if role in swap else None
@@ -778,7 +829,7 @@ def _swap_roles(s, kind, agent, role, ctx=None):
             role = swapped
     scoped = U["scoped_limit"]
     if ROLES[role][1] == "claude" and role in U["claude_fallback"] and (
-            cheap_first or codex_first or claude_low() or (scoped and role == scoped["role"] and _usage.get("scoped_high"))):
+            cheap_first or codex_first or claude_low() or (scoped and role == scoped.get("role") and _usage.get("scoped_high"))):
         new = _move(ctx, s, agent, role, U["claude_fallback"][role])
         if new:
             live(f"[{s['id']}] {'Codex first' if cheap_first or codex_first else 'Claude usage low'}: {role} -> {new} (Codex)")
@@ -843,7 +894,7 @@ def _assignment(ctx, role, burst):
         effort = teamcfg.bound_effort(cli, effort, cap, ctx["effort_min"])
         prof = role
     else:
-        cli, prof, model, effort = teamcfg.assign(ctx["h"], ctx["rank"], ROLES[role][1], cap, ctx["effort_min"])
+        cli, prof, model, effort = teamcfg.assign(ctx["h"], ctx["rank"], ctx.get("prefer") or ROLES[role][1], cap, ctx["effort_min"])
     ctx["record"].update(rank=ctx["rank"], tier_final=ctx["h"]["tiers"][ctx["rank"]]["name"], assigned=prof,
                          cli=cli, model=model, effort=effort)
     return cli, model, effort, prof
@@ -1215,6 +1266,8 @@ def take_capacity(res, held):
             f.close()
     else:
         return f"{MAX_PARALLEL} team runs are already in progress"
+    if set(res) & held_locks():
+        return f"resource '{', '.join(sorted(set(res) & held_locks()))}' is held for the user (`team hold`)"
     for r in res:
         f = (RUNS / f".lock-{r}").open("a")
         try:
@@ -1323,6 +1376,20 @@ def run_held(tid):
     return f is None
 
 
+def held_locks():
+    """[locks] reserved by a live `team hold` (its process keeps .lock-hold); a stale hold.json is ignored."""
+    try:
+        names = json.loads((RUNS / "hold.json").read_text())["locks"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return set()
+    with (RUNS / ".lock-hold").open("a") as f:
+        try:
+            teamcfg.lock(f, blocking=False)
+        except BlockingIOError:
+            return set(names)
+    return set()
+
+
 def queue_notes():
     """{key: line} from the queue file in file order, comments skipped."""
     try:
@@ -1353,7 +1420,7 @@ def dispatch():
         del _spawned[tid]
     tasks = {s["id"]: s for s in all_tasks()}
     active = {t for t, s in tasks.items() if s["status"] == "running" and run_held(t)} | set(_spawned)
-    busy = {r for t in active if t in tasks for r in tasks[t].get("res") or CFG["locks"]["default"]}
+    busy = {r for t in active if t in tasks for r in tasks[t].get("res") or CFG["locks"]["default"]} | held_locks()
     notes = queue_notes()
     rank = {k: i for i, k in enumerate(notes)}
     started = []
@@ -1794,6 +1861,54 @@ def cmd_wait(a):
         print(f"{tid} {st}: {text}")
 
 
+def cmd_hold(a):
+    """Reserve [locks] for the user (e.g. their own editor session): queued runs needing them stop starting at once,
+    running ones finish first. Held until `team release`, Ctrl+C or --hours."""
+    names = [r for r in (a.res.split(",") if a.res else CFG["locks"]["names"]) if r in CFG["locks"]["names"]]
+    if not names:
+        sys.exit(f"team hold: no [locks] to hold (known: {', '.join(CFG['locks']['names']) or 'none'})")
+    RUNS.mkdir(parents=True, exist_ok=True)
+    me = (RUNS / ".lock-hold").open("a")
+    try:
+        teamcfg.lock(me, blocking=False)
+    except BlockingIOError:
+        sys.exit("team hold: another hold is already active; `team release` ends it")
+    path, held, end = RUNS / "hold.json", [], time.time() + a.hours * 3600
+    try:
+        _atomic_write(path, json.dumps({"locks": names, "since": time.time()}))  # dispatch skips these from now on
+        for r in names:
+            f = (RUNS / f".lock-{r}").open("a")
+            live(f"hold: waiting for '{r}' (running tasks finish first)")
+            while True:  # polled, so `team release` and --hours also end a hold that is still waiting
+                try:
+                    teamcfg.lock(f, blocking=False)
+                    break
+                except BlockingIOError:
+                    if not path.exists() or time.time() >= end:
+                        f.close()
+                        return
+                    time.sleep(2)
+            held.append(f)
+        live(f"hold: {', '.join(names)} held for the user; `team release` frees them")
+        while path.exists() and time.time() < end:
+            time.sleep(2)
+    finally:
+        for f in held:
+            f.close()
+        path.unlink(missing_ok=True)
+        live("hold: released")
+        me.close()
+
+
+def cmd_release(a):
+    path = RUNS / "hold.json"
+    if not held_locks():
+        path.unlink(missing_ok=True)
+        sys.exit("team release: no active hold")
+    path.unlink(missing_ok=True)  # the hold process sees it within 2 s and releases its locks
+    print("team release: hold ends")
+
+
 def cmd_queue(a):
     """Queue runner: start queued tasks as capacity frees up (the dashboard alerts pane runs the same passes)."""
     while True:
@@ -1891,6 +2006,8 @@ def cmd_approve(a):
         sys.exit(f"{a.id} is {s['status']}; nothing to approve.")
     s["notes"].append(f"Approved ({s['reason']})" + (f": {a.note}" if a.note else ""))
     if s["status"] == "escalated":
+        if s.pop("apex_guard", None):
+            s["apex_approved"] = True  # the user allowed the guarded apex tier for this task
         s["plan_rounds"] = s["review_rounds"] = 0
         reset_escalation(s)
         stages = task_stages(s)
@@ -1919,6 +2036,8 @@ def cmd_redo(a):
     s["notes"].append(a.note)
     s["plan_rounds"] = s["review_rounds"] = 0
     s.pop("capped", None)  # redo starts below the cap, unlike approve
+    s.pop("apex_guard", None)
+    s.pop("apex_approved", None)  # redo starts over: the guard applies again
     reset_escalation(s)
     s["stage"] = -1 if not s["route"] else next(
         i for i, (k, _) in enumerate(task_stages(s)) if is_impl(k))
@@ -2010,6 +2129,32 @@ def metrics_lines(tids=None):
     return lines if ms else []
 
 
+def burst_line():
+    """`burst: ...` while [routing.usage].burst_file holds a future deadline, else ''."""
+    name = CFG["routing"]["usage"]["burst_file"]
+    try:
+        end = float((RUNS / name).read_text().strip()) if name else 0.0
+    except (OSError, ValueError):
+        return ""
+    if time.time() >= end:
+        return ""
+    return f"burst: active until {time.strftime('%Y-%m-%d %H:%M', time.localtime(end))} ({(end - time.time()) / 3600:.1f}h left)"
+
+
+def cmd_burst(a):
+    """Write (or with 0 hours end) the [routing.usage].burst_file deadline."""
+    name = CFG["routing"]["usage"]["burst_file"]
+    if not name:
+        sys.exit("team burst: set [routing.usage] burst_file in team.toml first")
+    RUNS.mkdir(parents=True, exist_ok=True)
+    if a.hours <= 0:
+        (RUNS / name).unlink(missing_ok=True)
+        live("burst: ended by the user")
+        return
+    _atomic_write(RUNS / name, f"{time.time() + a.hours * 3600:.0f}\n")
+    live(burst_line())
+
+
 def cmd_status(a):
     if getattr(a, "metrics", False):
         print("\n".join(metrics_lines()) or "No tasks yet.")
@@ -2030,6 +2175,8 @@ def cmd_status(a):
         print(VCS.opened(s["change"]).rstrip())
         return
     tasks = sorted(RUNS.glob("t[0-9]*"))
+    if line := burst_line():
+        print(line)
     if a.reverse or under_watch():  # dashboard pane: newest task on top, always visible without scrolling
         tasks.reverse()
     if not tasks:
@@ -2110,6 +2257,15 @@ def main():
     p = sub.add_parser("wait", help="block until a task needs attention or finishes, print it and exit")
     p.add_argument("--no-block", action="store_true", help="report what changed since the last wait and exit")
     p.set_defaults(func=cmd_wait)
+    p = sub.add_parser("hold", help="reserve [locks] for the user (own editor session) until `team release`")
+    p.add_argument("--res", default="", help="comma list of [locks].names (default: all)")
+    p.add_argument("--hours", type=float, default=4.0, help="release automatically after this long (default: 4)")
+    p.set_defaults(func=cmd_hold)
+    p = sub.add_parser("release", help="end an active `team hold`")
+    p.set_defaults(func=cmd_release)
+    p = sub.add_parser("burst", help="spend Claude for a while: Codex roles move to Claude, the apex guard is lifted")
+    p.add_argument("hours", type=float, help="duration in hours (0 ends an active burst)")
+    p.set_defaults(func=cmd_burst)
     p = sub.add_parser("tokens", help="tokens, cost and time per stage kind, agent and task (from the stage logs)")
     p.add_argument("ids", nargs="*", help="task ids (default: all)")
     p.add_argument("--runs", action="store_true", help="also list every stage run")

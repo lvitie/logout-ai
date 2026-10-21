@@ -26,6 +26,7 @@ deny_extra = ["chmod"]        # more Claude Bash(...) deny rules (git commands c
 mcp = "write"                 # Claude runs: user MCP servers load in "all" stages, only "write" (implement) stages, or "none"; each
                               # server's tools are re-sent every turn (read-only stage: ~82k tokens with them, ~6k without)
 user_skills = false           # true: also load the user's own Claude skills/slash commands (--disable-slash-commands otherwise)
+codex_sandbox = "workspace-write"  # "user": Codex writers follow your ~/.codex/config.toml instead of -s workspace-write
 
 [locks]                       # resources a task may hold; same lock = exclusive, different locks run in parallel
 names = ["editor", "gpu", "build"]
@@ -64,6 +65,7 @@ sound_urgent = "alarm-clock-elapsed.oga"
 
 [usage]
 claude_endpoint = false       # true: usage_tui may call Claude's usage endpoint with Claude Code's OAuth token
+extra_module = ""             # optional project .py (root-relative) adding usage_tui rows: rows(cfg, compact), json(cfg, timeout)
 
 # Canonical roles producer, mid, senior, architect, director are required; add more freely. The model/effort ladder
 # (low, mid, high, top, apex) and how to retune it: docs/MODEL_LADDER.md. apex is reached by escalation only.

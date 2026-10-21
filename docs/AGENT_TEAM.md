@@ -64,6 +64,9 @@ team redo <id> "feedback"         # send back to the implementer (or Producer)
 team drop <id> ["note"]
 team review [id ...]              # build and open the HTML review page (default: the latest done tasks)
 team queue [--once]               # start queued tasks as capacity frees up (the alerts pane does this)
+team hold [--res a,b] [--hours N] # reserve [locks] for your own session (editor, GPU); runs needing them wait
+team burst <hours>                # spend Claude for N hours (0 ends it): writes [routing.usage] burst_file
+team release                      # end the hold
 team wait [--no-block]            # block until a task needs attention or finishes, print it, exit
 team refill                       # ask the Producer for the next tasks now (pNNN lines in queue.txt)
 team promote <key ...>|all        # queue planned queue.txt lines (proposals or your own) as tasks
@@ -260,8 +263,13 @@ profiles, the `# --- ladder` rows and, for `git`/`none`, the `[vcs]` block.
 - `[vcs]`: `kind` (`git`, `none` or any `X` with `agent-team/vcs_X.py`), `guard_names`, `deny` (tool -> denied
   subcommands, `"*"` = whole tool), `deny_flags` (tool -> subcommand -> refused flags).
 - `[agents].deny_extra`: extra Claude `Bash(...)` deny rules. Rules from `[vcs.deny]` are added automatically.
-- `[agents].mcp` (`write` default, `none`, `all`): which Claude stages load the user's MCP servers (read-only stages skip them by default);
+- `[agents].mcp` (`write` default, `none`, `all`): which stages load the user's MCP servers (read-only stages skip them by default).
+  Claude gets `--strict-mcp-config`; Codex gets `-c mcp_servers.<name>.enabled=false` for every server in
+  `$CODEX_HOME/config.toml` and `<workspace>/.codex/config.toml`, plus `-c features.apps=false` (Codex has no strict flag
+  and merges `-c mcp_servers={}` into the user's table instead of replacing it);
   `[agents].user_skills` (default false): load the user's own skills/slash commands. See `docs/TOKEN_EFFICIENCY.md`.
+  `[agents].codex_sandbox` (`workspace-write` default, `user`): `user` drops `-s workspace-write` for Codex writers so
+  they follow the user's own `$CODEX_HOME/config.toml` (needed for editors, containers, GPU); read-only stages stay `-s read-only`.
 - `[locks]`: `names`, `default`; `[locks.<name>]` may set `min_free_mib`, `probe_cmd` (prints free MiB first) and
   `skip_if_holds`; the check is skipped when the probe binary is missing. Different locks run in parallel, the
   same lock is exclusive, `max_parallel` caps concurrent runs.
@@ -303,7 +311,7 @@ profiles, the `# --- ladder` rows and, for `git`/`none`, the `[vcs]` block.
     with a log line when the tier has none). `escalation_gate` and `capacity_fallback` targets must sit on a rank at
     or above the tier or are skipped (a capacity retry with nothing left blocks the task). `no_burst_effort` lowers
     the effort only down to the rules' and floor minimum. `enabled`, `limits`, `scoped_limit` and `burst_file` are
-    inputs only. A `takeover.<role>.to` reassigns the agent (its profile then comes from the heuristic); otherwise
+    inputs only (a role-less `scoped_limit` also picks the cli at apex: the apex guard below). A `takeover.<role>.to` reassigns the agent (its profile then comes from the heuristic); otherwise
     escalation keeps the same agent (see Escalation).
   - The `usage` input is only taken from a fresh, successful read (under 120 s old); disabled, failed or stale data
     never matches a `usage` rule, and the launch log says why.
@@ -335,8 +343,19 @@ profiles, the `# --- ladder` rows and, for `git`/`none`, the `[vcs]` block.
 - `[routing.usage]`: optional Claude/Codex plan balancing (`enabled = false` by default): `claude_fallback`,
   `limits`, `scoped_limit`, `surplus_swap`, `burst_swap`, `burst_file`, `cheap_first`, `no_burst_effort`,
   `escalation_gate`. Needs both CLIs and `usage_tui` data.
+  - `scoped_limit = { label, threshold, role? }`: a model-scoped usage window (`usage_tui --json` key, e.g.
+    `"7d Fable"`). With `role`, that role falls back via `claude_fallback` at or above the threshold. Without `role`
+    it is the apex guard (needs an apex tier): a stage stepped up to apex whose tier profile is Claude runs the apex
+    tier's codex profile instead, or, without one, goes to the user (`escalated`; `team approve` lets that task spend
+    apex, `team redo` drops it). The guard also applies while the Claude `limits` are reached, burst or not.
+  - Burst: while `burst_file` (under `state_dir`) holds a future epoch deadline (`team burst <hours>`), routing acts
+    as in Claude surplus: `cheap_first` and the Codex-first branch are off, `surplus_swap` plus `burst_swap` move
+    Codex roles to Claude, and the apex guard's threshold is ignored. The Claude `limits` still apply.
+    `team status` shows `burst: active until ...`.
 - `[prompts]`, `[notify]`, `[usage]`: read-only stage note, notification `review_cadence`, `review_cadence_rule`,
-  app name and sound dir, and `claude_endpoint`.
+  app name and sound dir, `claude_endpoint` and `extra_module` (empty by default: a root-relative Python file whose
+  `rows(cfg, compact)` returns `(drop_tier, line)` panel rows and `json(cfg, timeout)` returns extra `--json` keys; it
+  gets `usage_tui`'s namespace as `ui` for `bar`/`compact_row`; errors there never break the panel).
 
 Prompt templates use `{project}`, `{change_noun}`, `{domains}`, `{docs}` and `{state_dir}`.
 
@@ -413,11 +432,12 @@ dump, set it as Claude Code's `statusLine` command.
   that need network and write outside the project. Approval prompts follow the user's Codex config.
 - Claude runs with `--permission-mode auto`; read-only stages are limited to `Read,Glob,Grep`. Codex runs with
   `-s read-only` for read-only stages and `-s workspace-write` for implementers, whatever `$CODEX_HOME/config.toml`
-  sets.
+  sets (unless `[agents] codex_sandbox = "user"`).
 - `usage_tui` reads `$CODEX_HOME/sessions/**/*.jsonl` (only `rate_limits` lines), `$CLAUDE_CONFIG_DIR/projects/**/*.jsonl`
   (token counts) and spawns `codex app-server` for reset credits. It never reads `auth.json`.
 - Only with `[usage] claude_endpoint = true` does `usage_tui` read `$CLAUDE_CONFIG_DIR/.credentials.json` and
   call Claude's usage endpoint with that token. Off by default.
+- `[usage] extra_module` runs project code inside `usage_tui`; what it reads or calls is that project's business.
 - `codex_reset_consume.py --yes` is opt-in, spends a Codex reset credit and is never called automatically.
 - `[probes]` URLs are the only other network access (1 s HTTP GET).
 
