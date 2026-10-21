@@ -156,6 +156,25 @@ class Flags(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "windows_exec must be a list of program file names"):
             team.init(d / "team.toml")
 
+    def test_slim_log_events(self):
+        big = "x" * 30000
+        user = {"type": "user", "tool_use_result": {"stdout": big}, "message": {"content": [
+            {"type": "tool_result", "tool_use_id": "a", "content": big}, {"type": "text", "text": "hi"}]}}
+        s = team.slim(user)
+        self.assertNotIn("tool_use_result", s)
+        self.assertEqual(s["message"]["content"], [{"type": "tool_result", "tool_use_id": "a", "content": {"chars": 30000}},
+                                                   {"type": "text", "text": "hi"}])
+        self.assertEqual(team.slim({"type": "system", "subtype": "init", "session_id": "S", "model": "m", "tools": [1] * 99}),
+                         {"type": "system", "subtype": "init", "session_id": "S", "model": "m"})
+        ev = {"type": "item.completed", "item": {"type": "command_execution", "command": "ls", "aggregated_output": "abc"}}
+        self.assertEqual(team.slim(ev)["item"]["aggregated_output"], {"chars": 3})
+        for kept in ({"type": "assistant", "message": {}}, {"type": "result", "result": "r"}):
+            self.assertIsNone(team.slim(kept))
+        d = self.init()
+        log = d / "01-review-architect.jsonl"
+        log.write_text(json.dumps(s) + "\n")
+        self.assertEqual(tokens.run_stats(log)["big"], 1)  # the size survives slimming
+
     def test_bad_resume_value_is_refused(self):
         d = self.init()
         (d / "team.toml").write_text((d / "team.toml").read_text() + '\n[agents]\nresume = "yes"\n')

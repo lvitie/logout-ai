@@ -45,8 +45,9 @@ def run_stats(path):
                         seen[i["file_path"]] += 1
         elif t == "user":
             for b in (ev.get("message") or {}).get("content") or []:
-                if isinstance(b, dict) and b.get("type") == "tool_result" and len(str(b.get("content"))) > 20000:
-                    r["big"] += 1
+                c = b.get("content") if isinstance(b, dict) and b.get("type") == "tool_result" else None
+                if c is not None and (c["chars"] if isinstance(c, dict) and "chars" in c else len(str(c))) > 20000:
+                    r["big"] += 1  # slim logs keep only the size of a tool result
         elif t == "turn.completed":
             u = ev.get("usage") or {}
             r["cli"] = "codex"

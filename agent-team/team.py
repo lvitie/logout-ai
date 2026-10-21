@@ -543,6 +543,27 @@ def resume_prompt(parts, seen):
     return "\n\n".join([RESUME_LINE, *new, parts[-1][1]])
 
 
+def slim(ev):
+    """The event as stored in the raw log: tool output (already in the agent's context, often the bulk of the log) is
+    kept as its size, and the Claude init event as its ids; None: store the line unchanged."""
+    t = ev.get("type")
+    if t == "system" and ev.get("subtype") == "init":
+        return {k: ev[k] for k in ("type", "subtype", "session_id", "model") if k in ev}
+    if t == "user":
+        ev = dict(ev)
+        ev.pop("tool_use_result", None)  # a second copy of the tool result
+        msg = ev.get("message")
+        if isinstance(msg, dict) and isinstance(msg.get("content"), list):
+            ev["message"] = dict(msg, content=[dict(b, content={"chars": len(str(b.get("content")))})
+                                               if isinstance(b, dict) and b.get("type") == "tool_result" else b
+                                               for b in msg["content"]])
+        return ev
+    item = ev.get("item")
+    if isinstance(item, dict) and isinstance(item.get("aggregated_output"), str):  # Codex command output
+        return dict(ev, item=dict(item, aggregated_output={"chars": len(item["aggregated_output"])}))
+    return None
+
+
 def summarize(cli, ev):
     """Return (live line or None, final text or None) for one JSON event."""
     if cli == "claude":
@@ -1130,13 +1151,14 @@ def _run_agent_once(s, kind, agent, role, burst, ctx=None):
             except BrokenPipeError:  # it exited before reading the prompt (crash, auth error): its exit code says so
                 pass
             for line in proc.stdout:
-                rawf.write(line)
-                rawf.flush()
                 try:
                     ev = json.loads(line)
                     msg, result = summarize(cli, ev)
                 except (json.JSONDecodeError, AttributeError):
                     ev, msg, result = None, line.strip() or None, None
+                small = slim(ev) if isinstance(ev, dict) else None
+                rawf.write(line if small is None else json.dumps(small) + "\n")  # CLI errors and the rest: as is
+                rawf.flush()
                 if msg:
                     live(f"[{name}] {msg[:600]}")
                 if result is not None:

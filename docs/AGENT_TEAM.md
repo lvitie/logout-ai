@@ -448,6 +448,8 @@ End of a task. When a task reaches done, two quick steps run before the run ends
   `<state_dir>/learnings.md`: at most 20 bullets of at most 25 words, merged and pruned, or `UNCHANGED`. The file is
   not committed. Every stage prompt but refill carries it as `## Learnings from earlier tasks`; edit or delete it by
   hand at any time. A failing learn call never changes the task.
+- Raw logs are already lean while a stage runs: each tool result is stored as its size (`{"chars": n}`), the Claude
+  init event as its ids, and Codex command output as its size; CLI error lines stay as they are.
 - Tidy: the token rows of the task's stage logs go into `state.json` `runs` (so `team tokens`, `--metrics` and the
   review page keep working), then `logs/*.jsonl` and `logs/*.prompt.md` are deleted (about 85% of the state size) and
   the agent sessions are cleared. Hand-offs, `changes.diff` and `state.json` stay. `team drop` tidies too;
