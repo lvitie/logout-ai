@@ -334,12 +334,26 @@ done
 # shellcheck disable=SC2016
 documented_skills="$(
   sed -n '/^## Repository skills$/,/^## /p' "$repo_root/docs/SKILLS.md" |
-    sed -n 's/^- `\([^`]*\)`$/\1/p' |
+    sed -n 's/^- `\([^`]*\)`\(:.*\)\{0,1\}$/\1/p' |
     sort
 )"
 actual_skills="$(printf '%s' "$actual_skills" | sort)"
 [[ "$documented_skills" == "$actual_skills" ]] ||
   fail "docs/SKILLS.md does not match .agents/skills"
+
+# shellcheck disable=SC2016
+documented_task_skills="$(
+  sed -n '/^### Task skills$/,/^### /p' "$repo_root/docs/SKILLS.md" |
+    sed -n 's/^- `\([^`]*\)`\(:.*\)\{0,1\}$/\1/p' |
+    sort
+)"
+actual_task_skills="$(
+  for f in "$repo_root"/agent-team/templates/skills/*.md; do
+    [[ "$(basename "$f")" == INDEX.md ]] || basename "$f" .md
+  done | sort
+)"
+[[ "$documented_task_skills" == "$actual_task_skills" ]] ||
+  fail "docs/SKILLS.md task skills do not match agent-team/templates/skills"
 
 bash "$repo_root/scripts/check-required-checks.sh" --local ||
   fail "required check names drift between docs/REQUIRED_CHECKS.md, docs/rulesets and validate.yml"
