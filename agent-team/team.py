@@ -248,6 +248,15 @@ def save(s):
     (task_dir(s["id"]) / "state.json").write_text(json.dumps(s, indent=2))
 
 
+def read_state(d):
+    """The task state in folder d, or None when it has none or it is unreadable."""
+    try:
+        s = json.loads((d / "state.json").read_text())
+    except (OSError, ValueError):
+        return None
+    return s if isinstance(s, dict) and "id" in s else None
+
+
 def task_times(s):
     """Read timing fields, with task-local file times for pre-timestamp tasks."""
     times = {key: s.get(key) for key in ("created", "stage_started", "finished")}
@@ -1357,15 +1366,7 @@ def run_lock(tid, patience=0.0):
 
 def all_tasks():
     """Task states in id order; folders without a readable state.json are skipped."""
-    found = []
-    for d in sorted(RUNS.glob("t[0-9]*")):
-        try:
-            s = json.loads((d / "state.json").read_text())
-        except (OSError, ValueError):
-            continue
-        if isinstance(s, dict) and "id" in s:
-            found.append(s)
-    return found
+    return [s for s in map(read_state, sorted(RUNS.glob("t[0-9]*"))) if s]
 
 
 def run_held(tid):
@@ -2183,10 +2184,8 @@ def cmd_status(a):
         print('No tasks yet. Start one with: team new "<request>"')
     now = time.time()
     for d in tasks:
-        try:
-            s = json.loads((d / "state.json").read_text())
-            assert isinstance(s, dict) and "id" in s
-        except (OSError, ValueError, AssertionError):
+        s = read_state(d)
+        if not s:
             continue  # no or corrupt state.json (a folder synced from the depot, or mid-write)
         print(f"{s['id']}  {s['status']:9}  chg:{s['change']}  {str(s['route']):7} {str(s['domain']):8} "
               f"{stage_label(s):22} {(s['title'] or s['request'])[:50]}\t{format_task_timing(s, now)}")
