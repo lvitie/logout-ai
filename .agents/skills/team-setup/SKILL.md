@@ -25,7 +25,7 @@ scratch:
 - Task skills: 41 game-dev skills covering AAA studio roles, listed with their
   roles and agents in `agent-team/templates/skills/INDEX.md` (research:
   `docs/GAME_DEV_ROLES.md`).
-- VCS `p4` (Unreal/Perforce) and locks `editor` (default), `gpu`, `build`.
+- VCS `p4` (Unreal/Perforce) and locks `editor`, `gpu`, `build` (leased by agents while in use).
 
 ## Inputs
 
@@ -87,12 +87,11 @@ scratch:
      quality. This sets `cli`, `model`, and `effort` per role. Use only model ids
      that are already in `team.toml` or the `write_config.py` presets, unless
      the user names others.
-   - **Shared resources:** the defaults are `editor` (every task holds it, so tasks
-     run one at a time), `gpu` (GPU captures or renders; free-memory check skipped
-     while `editor` is held) and `build` (standalone compiles, cooks, packaging).
-     Tasks pick others with `team new --res gpu|build|none` (`none` = read-only or
-     tool-only work); ask which areas may run in parallel and what else must not
-     be shared (`[locks]`), how many tasks may
+   - **Shared resources:** the defaults are `editor`, `gpu` (GPU captures or
+     renders; free-memory check skipped while the task holds `editor`) and `build`
+     (standalone compiles, cooks, packaging). Agents lease one only while they use
+     it (`team lock`), so tasks run in parallel; ask what else must not be used by
+     two tasks at once (`[locks]`), how many tasks may
      run together (`max_parallel`), and local services the agents depend on
      (`[probes]`, name = URL).
    - **Rules:** build, test, and lint commands, areas agents must not touch,
@@ -102,8 +101,6 @@ scratch:
      unchecked items under "## Current phase" or ROADMAP.md is missing or empty:
      the project goal, the first milestone, and 3-8 first work items. Draft
      them from the README and the answers above; ask only what those leave open.
-     Also say that with the default `editor` lock tasks run one at a time,
-     and ask which areas can run in parallel (`--res`, narrower `default`).
    - **Queue autonomy:** which Producer refill proposals the coordinator may
      queue without asking. Default: those without a `(needs user: ...)`
      suffix (current-phase work); alternatives: every proposal, or none.

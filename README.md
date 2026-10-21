@@ -259,8 +259,9 @@ setup warns when it is not. To add it for your user:
 
 ### 2. Review `team.toml`
 
-Check the role models and effort levels, `[locks]` for exclusive resources
-such as the editor, GPU or build (the template ships `editor`, `gpu` and `build`), and `[probes]` for local services the agents depend
+Check the role models and effort levels, `[locks]` for resources an agent must
+use alone, such as the editor, GPU or build (the template ships `editor`, `gpu` and `build`; agents lease one only
+while they use it), and `[probes]` for local services the agents depend
 on. For project rules, set `templates_dir` and put them in
 `<templates_dir>/roles/common.md`. The commented template documents every
 option.
@@ -298,7 +299,7 @@ alerts pane, and has a coordinator chat where you can ask for work in plain
 language. Alerts sit at the top right, above tasks and the coordinator. When a task needs you (a gate, a question, a failure) or finishes,
 the alerts pane sends a desktop notification and opens an HTML review page with
 the reason, the commands for the next step, the summary, plan, diff, and media.
-When every slot or lock is busy, a new or approved task is queued instead of
+When every slot is busy, a new or approved task is queued instead of
 refused, and the alerts pane starts it once capacity frees up. The coordinator
 keeps a `team wait` running, so it hears about gates, failures and finished
 tasks without polling. When the queue runs low, the Producer proposes the next

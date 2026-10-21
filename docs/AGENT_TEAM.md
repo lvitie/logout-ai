@@ -64,7 +64,7 @@ team redo <id> "feedback"         # send back to the implementer (or Producer)
 team drop <id> ["note"]
 team review [id ...]              # build and open the HTML review page (default: the latest done tasks)
 team queue [--once]               # start queued tasks as capacity frees up (the alerts pane does this)
-team hold [--res a,b] [--hours N] # reserve [locks] for your own session (editor, GPU); runs needing them wait
+team hold [--res a,b] [--hours N] # lease [locks] to your own session (editor, GPU); agents' `team lock` waits
 team burst <hours>                # spend Claude for N hours (0 ends it): writes [routing.usage] burst_file
 team release                      # end the hold
 team wait [--no-block]            # block until a task needs attention or finishes, print it, exit
@@ -113,10 +113,10 @@ On Windows the coordinator runs npm-installed CLIs through their node script rat
 `cmd.exe` re-parses arguments and cuts multi-line prompts. VCS guards become `.cmd` and Git Bash shims under
 `guard-bin/` instead of symlinks.
 
-When `new`, `approve`, `redo` or `run` finds no free slot (`max_parallel`), a busy lock or too little free
-resource, it saves the task as `new` and queued with a `queued: ...` reason (notes and stage kept) and exits 0.
-Every 10 s the alerts pane, a waiting `team wait` (every 5 s) or `team queue` starts queued tasks in `queue.txt` order, then by id, while slots and
-their locks are free and the lock probes pass; a task whose queue line says `(after t003)` waits until t003 is done
+When `new`, `approve`, `redo` or `run` finds no free slot (`max_parallel`), it saves the task as `new` and queued
+with a `queued: ...` reason (notes and stage kept) and exits 0. Every 10 s the alerts pane, a waiting `team wait`
+(every 5 s) or `team queue` starts queued tasks in `queue.txt` order, then by id, while slots are free; a task whose
+queue line says `(after t003)` waits until t003 is done
 (and is reported as held if t003 is dropped). `--no-run` tasks are
 never started by the queue. Queue runs are detached from the dashboard, log to `<task>/logs/queue-run.log` and
 recheck under the task's run lock that it is still queued, so two runners cannot run it twice. `team wait` is how the coordinator chat learns about
@@ -270,9 +270,16 @@ profiles, the `# --- ladder` rows and, for `git`/`none`, the `[vcs]` block.
   `[agents].user_skills` (default false): load the user's own skills/slash commands. See `docs/TOKEN_EFFICIENCY.md`.
   `[agents].codex_sandbox` (`workspace-write` default, `user`): `user` drops `-s workspace-write` for Codex writers so
   they follow the user's own `$CODEX_HOME/config.toml` (needed for editors, containers, GPU); read-only stages stay `-s read-only`.
-- `[locks]`: `names`, `default`; `[locks.<name>]` may set `min_free_mib`, `probe_cmd` (prints free MiB first) and
-  `skip_if_holds`; the check is skipped when the probe binary is missing. Different locks run in parallel, the
-  same lock is exclusive, `max_parallel` caps concurrent runs.
+- `[locks]`: `names` are shared resources (editor, GPU, build) that an agent leases only while it uses one:
+  implement stages get the rule and the exact commands, `team lock <name> [--wait S]` before starting it (exit 3
+  while another task or `team hold` has it) and `team unlock <name>` as soon as it stops. A lease lives in
+  `<state_dir>/lease-<name>.json` and only counts while its task's run lock (or the hold process) is alive, and the
+  run frees every lease of its task when it ends, so a forgotten or crashed lease never blocks others. Tasks no
+  longer wait for resources to start; only `max_parallel` caps concurrent runs. `[locks.<name>]` may set
+  `min_free_mib`, `probe_cmd` (prints free MiB first) and `skip_if_holds`: `team lock` refuses while the probe
+  reports too little, skipped when the probe binary is missing or the task holds the `skip_if_holds` lock.
+  `default` and `team new --res` still load for old configs and scripts but gate nothing. `team status` prints a
+  `locks:` line while any lease is held.
 - `[probes]`: `name = url`, reported to agents as `name up|down`. Empty by default.
 - `[roles.<key>]`: `name`, `cli` (`claude`|`codex`), `model`, `effort`. `producer`, `mid`, `senior`, `architect`,
   `director` are required; others are free.
@@ -405,7 +412,7 @@ agent left behind cannot hold the run open. A model counts as at capacity only w
 `capacity_fallback` stops after each role was tried once.
 
 The focus pane shows the planning focus, running tasks (stage, planned and actual role, model and effort, round,
-elapsed time, the agent's last line), lock holders, what needs you (gates, blocked, escalated, failed and corrupt
+elapsed time, the agent's last line), lease holders, what needs you (gates, blocked, escalated, failed and corrupt
 tasks, tasks marked running whose process is gone, user-owned planning items, pending changes), the queue with why
 each task waits, and today's finished tasks. A task counts as running only while a team process holds its
 `.lock-run`.
@@ -413,7 +420,7 @@ each task waits, and today's finished tasks. A task counts as running only while
 ## State and runtime inputs
 
 Per project, under `state_dir`: `live.log`, `tNNN/` task folders (`state.json`, `.lock-run` held while it runs, hand-offs, `logs/`, `opened.txt`,
-`changes.diff`, `user_opened.txt`, `packet/`), `.lock-*`, `.wait-seen.json`, `refill/` (refill runs and the proposal log), `guard-bin/`, `team.kdl`, `review/`. Optional inputs you
+`changes.diff`, `user_opened.txt`, `packet/`), `.lock-*`, `lease-<name>.json`, `.wait-seen.json`, `refill/` (refill runs and the proposal log), `guard-bin/`, `team.kdl`, `review/`. Optional inputs you
 create by hand: `queue.txt` (`tNNN: title` lines; their order and `(after tNNN)` notes drive the queue), `decisions.md` (shown by `review_page`), `role_override.json`
 (`{"t012": {"review": "director", "implement": "senior", "after_failed_reviews": 1}}`) and the `burst_file`
 (epoch deadline).
@@ -465,8 +472,8 @@ What `templates/team.toml` and the setup preset ship, and what `team-setup` conf
   gameplay` implements on `mid`.
 - Side tasks: `side_task_roles` and `side_task_domains` name agents (an agent file or a `[roles]` key), and domain
   values must be in `routing.domains`.
-- Locks: `editor` (default, every task), `gpu` (free-memory probe, skipped while `editor` is held) and `build`; pick
-  others with `team new --res gpu|build|none`. `locks.default` entries must be in `names`.
+- Locks: `editor`, `gpu` (free-memory probe, skipped while the task holds `editor`) and `build`, leased by the agent
+  while in use (`team lock`). `locks.default` entries must be in `names`.
 - Task skills: 41 grouped by workflow across design, programming, art, audio, production and quality (`INDEX.md`;
   `optimization` baselines with `perf-capture`, touches only the requested hot path, records before and after and drops
   changes without a gain). Each has `## When to use` (with a `Not for:` boundary), `## Inputs`, `## Method`,

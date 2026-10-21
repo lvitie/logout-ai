@@ -375,12 +375,24 @@ def diff_summary(path, limit=40):
     return "\n".join(rows + ([f"- ... {len(files) - limit} more"] if len(files) > limit else []))
 
 
+def lock_note():
+    """The shared-resource rule for stages that run commands: lease a [locks] resource only while it is in use."""
+    names = [n for n in CFG["locks"]["names"] if n != "none"]
+    if not names:
+        return ""
+    cmd = f'"{Path(sys.executable).as_posix()}" "{(HERE / "team.py").as_posix()}"'
+    return (f"## Shared resources\nLocks: {', '.join(names)}. Hold one only while you use it:\n"
+            f"- before starting it: `{cmd} lock <name> --wait 540` (exit 3: still busy; run it again, or report BLOCKED);\n"
+            f"- as soon as you stop it: `{cmd} unlock <name>`. Your locks are freed anyway when the task's run ends.")
+
+
 def build_prompt(s, kind, agent, skills=()):
     d = task_dir(s["id"])
     probes = env_status()
     parts = [role_text(agent), agent_skills_table(agent, skills) if kind not in ("route", "refill") else "",
              fmt(teamcfg.template(CFG, "roles/common.md")),
              fmt(teamcfg.template(CFG, f"vcs/{CFG['vcs']['kind']}.md")),
+             lock_note() if is_impl(kind) else "",
              f"Task {s['id']} | {noun()} {s['change']} | folder {d} | {s.get('route')}/{s.get('domain')}"
              + (f" | {probes}" if probes else ""),
              "## Request\n" + s["request"]]
@@ -943,7 +955,7 @@ def _run_agent_once(s, kind, agent, role, burst, ctx=None):
     text = build_prompt(s, kind, agent, skills)
     (d / "logs" / f"{stem}.prompt.md").write_text(text)
     ensure_guards()
-    env = dict(os.environ, TEAM_TASK=s["id"], TEAM_CHANGE=str(s["change"]), TEAM_ROLE=agent,
+    env = dict(os.environ, TEAM_TASK=s["id"], TEAM_CHANGE=str(s["change"]), TEAM_ROLE=agent, TEAM_STAGE=stem,
                TEAM_CONFIG=CFG["config_path"], PATH=f"{_guard_dir()}{os.pathsep}{_clean_path()}")
     for tool in CFG["vcs"]["guard_names"]:  # used by the edit hook; the guard falls back to a PATH search
         real = shutil.which(tool, path=_clean_path())
@@ -1263,45 +1275,117 @@ def resource_ok(name):
         return True
 
 
-def take_capacity(res, held):
-    """A slot under max_parallel and the [locks] in res, appended to held; returns why the run must wait, or None."""
+def take_slot(held):
+    """A slot under max_parallel, appended to held; returns why the run must wait, or None."""
     for name in [f"slot{i}" for i in range(MAX_PARALLEL)]:  # global concurrency cap
         f = (RUNS / f".lock-{name}").open("a")
         try:
             teamcfg.lock(f, blocking=False)
             held.append(f)
-            break
+            return None
         except BlockingIOError:
             f.close()
-    else:
-        return f"{MAX_PARALLEL} team runs are already in progress"
-    if set(res) & held_locks():
-        return f"resource '{', '.join(sorted(set(res) & held_locks()))}' is held for the user (`team hold`)"
-    for r in res:
-        f = (RUNS / f".lock-{r}").open("a")
-        try:
-            teamcfg.lock(f, blocking=False)
-        except BlockingIOError:
-            f.close()
-            return f"resource '{r}' is busy with another team run"
-        held.append(f)
-    return resource_low(res)
+    return f"{MAX_PARALLEL} team runs are already in progress"
 
 
-def resource_low(res):
-    """Why the [locks] probes refuse a run holding res, or None."""
-    for r in res:
-        lc = CFG["locks"].get(r)
-        if isinstance(lc, dict) and lc.get("skip_if_holds") not in res and not resource_ok(r):
-            return f"not enough free resource '{r}' (< {lc.get('min_free_mib')} MiB) to run next to other jobs"
+# --- Resource leases: an agent (or the user's `team hold`) holds a [locks] resource only while it uses it ---
+
+def _lease_file(name):
+    return RUNS / f"lease-{name}.json"
+
+
+def read_lease(name):
+    try:
+        lease = json.loads(_lease_file(name).read_text())
+    except (OSError, ValueError):
+        return None
+    return lease if isinstance(lease, dict) else None
+
+
+def lease(name):
+    """The live lease on resource name ({task, stage, owner, since}); None when free or its holder is gone (the
+    task's run ended, or the `team hold` process exited), so a crashed run never keeps a resource."""
+    cur = read_lease(name)
+    if not cur:
+        return None
+    try:
+        alive = hold_active() if cur.get("owner") == "user" else bool(cur.get("task")) and run_held(cur["task"])
+    except OSError:  # e.g. the owner's task folder is gone
+        alive = False
+    return cur if alive else None
+
+
+def leases():
+    """{name: live lease} for the configured [locks]."""
+    return {n: cur for n in CFG["locks"]["names"] if (cur := lease(n))}
+
+
+def lease_text(name, cur):
+    who = "the user (`team hold`)" if cur.get("owner") == "user" else f"{cur['task']}, {cur.get('stage') or '?'}"
+    return f"{name} ({who}, since {time.strftime('%H:%M', time.localtime(cur.get('since', 0)))})"
+
+
+def probe_refuses(name, task):
+    """Why the [locks.<name>] probe refuses the lease (too little free MiB), or None; skipped while the task holds
+    the lock named by skip_if_holds (e.g. the editor already accounts for the GPU it uses)."""
+    lc = CFG["locks"].get(name)
+    if not isinstance(lc, dict):
+        return None
+    other = lc.get("skip_if_holds")
+    if other and (cur := lease(other)) and cur.get("task") == task:
+        return None
+    return None if resource_ok(name) else f"not enough free {name} (< {lc.get('min_free_mib')} MiB) next to other jobs"
+
+
+def take_lease(name, task, stage="", owner="agent"):
+    """Lease resource name to task (owner agent) or to the user (task "user"); None, or why it is not free now."""
+    RUNS.mkdir(parents=True, exist_ok=True)
+    if owner == "agent" and (why := probe_refuses(name, task)):
+        return why
+    with (RUNS / f".lock-{name}").open("a") as f:
+        teamcfg.lock(f)  # an instant: check and write as one step
+        cur = lease(name)
+        if cur and (cur.get("owner"), cur.get("task")) != (owner, task):
+            return f"busy: {lease_text(name, cur)}"
+        _atomic_write(_lease_file(name), json.dumps({"task": task, "stage": stage, "owner": owner, "since": time.time()}))
     return None
 
 
-def advance(s, from_queue=False):
-    """Run a task. Tasks that need different resources ([locks]) run in parallel; the same resource is exclusive.
-    Without capacity the task is saved as new and queued (notes and stage kept); the queue runner starts it later."""
+def drop_leases(task, names=None, owner="agent"):
+    """Free the leases task holds (all, or names); returns the names freed."""
+    freed = []
+    for n in names or CFG["locks"]["names"]:
+        with (RUNS / f".lock-{n}").open("a") as f:
+            teamcfg.lock(f)
+            cur = read_lease(n)
+            if cur and (cur.get("owner"), cur.get("task")) == (owner, task):
+                _lease_file(n).unlink(missing_ok=True)
+                freed.append(n)
+    return freed
+
+
+def lease_line():
+    """`locks: ...` while any resource is leased, else ''."""
+    cur = leases()
+    return "locks: " + ", ".join(lease_text(n, cur[n]) for n in cur) if cur else ""
+
+
+def hold_active():
+    """True while a `team hold` process keeps .lock-hold."""
     RUNS.mkdir(parents=True, exist_ok=True)
-    res = [r for r in s.get("res") or CFG["locks"]["default"] if r != "none"]
+    with (RUNS / ".lock-hold").open("a") as f:
+        try:
+            teamcfg.lock(f, blocking=False)
+        except BlockingIOError:
+            return True
+    return False
+
+
+def advance(s, from_queue=False):
+    """Run a task: [locks] resources are not taken here, the agent leases them while it uses them (`team lock`).
+    Without a free slot the task is saved as new and queued (notes and stage kept); the queue runner starts it later.
+    When the run ends, however it ends, the task's leases are freed."""
+    RUNS.mkdir(parents=True, exist_ok=True)
     held = []
     try:
         f = run_lock(s["id"], patience=1)  # first: only the lock holder may save the state below
@@ -1312,7 +1396,7 @@ def advance(s, from_queue=False):
             s = load(s["id"])  # another runner may have started it since the dispatcher looked
             if s["status"] != "new" or not s.get("queued"):
                 return
-        wait = take_capacity(res, held)
+        wait = take_slot(held)
         if wait:
             s["status"], s["reason"], s["queued"] = "new", f"queued: {wait}", True
             save(s)
@@ -1343,6 +1427,10 @@ def advance(s, from_queue=False):
                 s["stage_started"] = time.time()
             save(s)
     finally:
+        if held:  # this process holds the run lock: free what the agents forgot to unlock
+            freed = drop_leases(s["id"])
+            if freed:
+                live(f"[{s['id']}] run ended: freed {', '.join(freed)}")
         for f in held:
             f.close()
     live(f"[{s['id']}] {s['status']}: {s['reason']}")
@@ -1377,20 +1465,6 @@ def run_held(tid):
     return f is None
 
 
-def held_locks():
-    """[locks] reserved by a live `team hold` (its process keeps .lock-hold); a stale hold.json is ignored."""
-    try:
-        names = json.loads((RUNS / "hold.json").read_text())["locks"]
-    except (OSError, ValueError, KeyError, TypeError):
-        return set()
-    with (RUNS / ".lock-hold").open("a") as f:
-        try:
-            teamcfg.lock(f, blocking=False)
-        except BlockingIOError:
-            return set(names)
-    return set()
-
-
 def queue_notes():
     """{key: line} from the queue file in file order, comments skipped."""
     try:
@@ -1415,13 +1489,12 @@ _spawned = {}  # tid -> Popen of runs this process started, so a run that is sti
 
 def dispatch():
     """One queue pass: start queued tasks (refused for capacity, not `--no-run` ones) in queue-file order, then by id,
-    while slots and their [locks] are free and the tasks named in an `after tNNN` note are done. Runs are detached,
-    log to <task>/logs/queue-run.log and recheck under the run lock that the task is still queued."""
+    while slots are free and the tasks named in an `after tNNN` note are done. Runs are detached, log to
+    <task>/logs/queue-run.log and recheck under the run lock that the task is still queued."""
     for tid in [t for t, p in _spawned.items() if p.poll() is not None]:
         del _spawned[tid]
     tasks = {s["id"]: s for s in all_tasks()}
     active = {t for t, s in tasks.items() if s["status"] == "running" and run_held(t)} | set(_spawned)
-    busy = {r for t in active if t in tasks for r in tasks[t].get("res") or CFG["locks"]["default"]} | held_locks()
     notes = queue_notes()
     rank = {k: i for i, k in enumerate(notes)}
     started = []
@@ -1431,9 +1504,6 @@ def dispatch():
             break
         if any(tasks.get(t, {}).get("status") != "done" for t in queue_deps(notes.get(s["id"], ""))):
             continue
-        res = {r for r in s.get("res") or CFG["locks"]["default"] if r != "none"}
-        if res & busy or resource_low(res):  # a probe-blocked task must not take the slot of a runnable one
-            continue
         logs = task_dir(s["id"]) / "logs"
         logs.mkdir(exist_ok=True)
         with (logs / "queue-run.log").open("a") as out:
@@ -1442,7 +1512,6 @@ def dispatch():
                 stdin=subprocess.DEVNULL, stdout=out, stderr=subprocess.STDOUT, **detach_kw())
         live(f"[{s['id']}] queue: starting", echo=False)
         active.add(s["id"])
-        busy |= res
         started.append(s["id"])
     if not refill_blocker(tasks, active):
         logs = RUNS / "refill" / "logs"
@@ -1562,7 +1631,7 @@ def cmd_refill(a):
     try:
         if refill_allowance(refill_state()) <= 0:  # capped is not exhausted: record nothing
             sys.exit("Daily proposal cap reached; the refill runs tomorrow.")
-        if take_capacity([], held):  # the Producer run counts against max_parallel like any other
+        if take_slot(held):  # the Producer run counts against max_parallel like any other
             sys.exit("Every team slot is busy; the refill runs later.")
         _refill()
     finally:
@@ -1863,8 +1932,8 @@ def cmd_wait(a):
 
 
 def cmd_hold(a):
-    """Reserve [locks] for the user (e.g. their own editor session): queued runs needing them stop starting at once,
-    running ones finish first. Held until `team release`, Ctrl+C or --hours."""
+    """Lease [locks] to the user (e.g. their own editor session): agents' `team lock` waits from now on, and agents
+    already holding one keep it until they unlock it or their run ends. Held until `team release`, Ctrl+C or --hours."""
     names = [r for r in (a.res.split(",") if a.res else CFG["locks"]["names"]) if r in CFG["locks"]["names"]]
     if not names:
         sys.exit(f"team hold: no [locks] to hold (known: {', '.join(CFG['locks']['names']) or 'none'})")
@@ -1874,39 +1943,63 @@ def cmd_hold(a):
         teamcfg.lock(me, blocking=False)
     except BlockingIOError:
         sys.exit("team hold: another hold is already active; `team release` ends it")
-    path, held, end = RUNS / "hold.json", [], time.time() + a.hours * 3600
+    path, end = RUNS / "hold.json", time.time() + a.hours * 3600
     try:
-        _atomic_write(path, json.dumps({"locks": names, "since": time.time()}))  # dispatch skips these from now on
+        _atomic_write(path, json.dumps({"locks": names, "since": time.time()}))  # `team release` deletes it
         for r in names:
-            f = (RUNS / f".lock-{r}").open("a")
-            live(f"hold: waiting for '{r}' (running tasks finish first)")
-            while True:  # polled, so `team release` and --hours also end a hold that is still waiting
-                try:
-                    teamcfg.lock(f, blocking=False)
-                    break
-                except BlockingIOError:
-                    if not path.exists() or time.time() >= end:
-                        f.close()
-                        return
-                    time.sleep(2)
-            held.append(f)
+            if take_lease(r, "user", owner="user"):
+                live(f"hold: waiting for '{r}' (its agent unlocks it or its run ends)")
+            while take_lease(r, "user", owner="user"):  # polled, so `team release` and --hours also end a waiting hold
+                if not path.exists() or time.time() >= end:
+                    return
+                time.sleep(2)
         live(f"hold: {', '.join(names)} held for the user; `team release` frees them")
         while path.exists() and time.time() < end:
             time.sleep(2)
     finally:
-        for f in held:
-            f.close()
+        drop_leases("user", names, owner="user")
         path.unlink(missing_ok=True)
         live("hold: released")
         me.close()
 
 
+def cmd_lock(a):
+    """Agent side: lease a [locks] resource to the task in $TEAM_TASK before using it; exit 3 while it stays busy."""
+    task = os.environ.get("TEAM_TASK")
+    if a.name not in CFG["locks"]["names"]:
+        sys.exit(f"team lock: unknown lock {a.name!r} (known: {', '.join(CFG['locks']['names']) or 'none'})")
+    if not task:
+        sys.exit("team lock: TEAM_TASK is unset; run it from a team stage")
+    end = time.time() + a.wait
+    while why := take_lease(a.name, task, os.environ.get("TEAM_STAGE", "")):
+        if time.time() >= end:
+            print(f"team lock: {a.name} {why}", file=sys.stderr)
+            sys.exit(3)
+        time.sleep(2)
+    live(f"[{task}] locked {a.name}", echo=False)
+    print(f"locked {a.name}")
+
+
+def cmd_unlock(a):
+    task = os.environ.get("TEAM_TASK")
+    if not task:
+        sys.exit("team unlock: TEAM_TASK is unset; run it from a team stage")
+    if drop_leases(task, [a.name]):
+        live(f"[{task}] unlocked {a.name}", echo=False)
+        print(f"unlocked {a.name}")
+    elif cur := lease(a.name):
+        print(f"team unlock: {a.name} is held by {lease_text(a.name, cur)}, not {task}", file=sys.stderr)
+        sys.exit(3)
+    else:
+        print(f"{a.name} was not locked")
+
+
 def cmd_release(a):
     path = RUNS / "hold.json"
-    if not held_locks():
+    if not hold_active():
         path.unlink(missing_ok=True)
         sys.exit("team release: no active hold")
-    path.unlink(missing_ok=True)  # the hold process sees it within 2 s and releases its locks
+    path.unlink(missing_ok=True)  # the hold process sees it within 2 s and frees its leases
     print("team release: hold ends")
 
 
@@ -2176,8 +2269,9 @@ def cmd_status(a):
         print(VCS.opened(s["change"]).rstrip())
         return
     tasks = sorted(RUNS.glob("t[0-9]*"))
-    if line := burst_line():
-        print(line)
+    for line in (burst_line(), lease_line()):
+        if line:
+            print(line)
     if a.reverse or under_watch():  # dashboard pane: newest task on top, always visible without scrolling
         tasks.reverse()
     if not tasks:
@@ -2217,7 +2311,7 @@ def main():
                    "earlier failures still raise a lighter route to complex)")
     p.add_argument("--risk", choices=teamcfg.RISKS, help="heuristic input for a side task (default: high)")
     p.add_argument("--size", choices=teamcfg.SIZES, help="heuristic input for a side task (default: large)")
-    p.add_argument("--res", default="", help="locks used, comma list of [locks].names or none (default: [locks].default)")
+    p.add_argument("--res", default="", help="kept for old scripts: [locks] no longer gate a run, agents `team lock` them")
     p.add_argument("--skill", action="append", default=[], metavar="NAME[@STAGE]",
                    help="task skill (skills/<name>.md) added to this task's prompt, for one stage or all; repeatable")
     p.add_argument("--no-run", action="store_true", help="create the task only; start it later with `team run <id>`")
@@ -2260,6 +2354,13 @@ def main():
     p.add_argument("--res", default="", help="comma list of [locks].names (default: all)")
     p.add_argument("--hours", type=float, default=4.0, help="release automatically after this long (default: 4)")
     p.set_defaults(func=cmd_hold)
+    p = sub.add_parser("lock", help="agent stage: lease a [locks] resource while using it (exit 3 while busy)")
+    p.add_argument("name", help="a [locks].names entry, e.g. editor")
+    p.add_argument("--wait", type=float, default=0.0, help="seconds to keep trying while it is busy (default: 0)")
+    p.set_defaults(func=cmd_lock)
+    p = sub.add_parser("unlock", help="agent stage: free a [locks] resource this task leased")
+    p.add_argument("name")
+    p.set_defaults(func=cmd_unlock)
     p = sub.add_parser("release", help="end an active `team hold`")
     p.set_defaults(func=cmd_release)
     p = sub.add_parser("burst", help="spend Claude for a while: Codex roles move to Claude, the apex guard is lifted")

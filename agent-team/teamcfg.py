@@ -651,7 +651,10 @@ def xdg(var, default):
 def codex_journal():
     """Usage history, route mode, reset cache/log for one Codex account, shared by every project using it."""
     d = xdg("XDG_STATE_HOME", "~/.local/state") / "agent-team" / "codex" / account_key(codex_home())
-    d.mkdir(parents=True, exist_ok=True)
+    try:
+        d.mkdir(parents=True, exist_ok=True)
+    except OSError:  # e.g. `team lock` from a Codex stage, whose sandbox cannot write there
+        pass
     return d
 
 

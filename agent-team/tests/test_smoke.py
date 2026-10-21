@@ -91,7 +91,7 @@ class Project(unittest.TestCase):
         self.assertIn("exited 99", state["reason"])
         prompt = (self.proj / ".agent-team/t001/logs/01-route-producer.prompt.md").read_text()
         self.assertIn("working-tree changes t001", prompt)
-        self.assertIn("simple|complex|hard|ask", prompt)
+        self.assertIn("ROUTE: direct|bundled|planned|complex|hard|ask", prompt)
         self.assertIn("DOMAIN: gameplay|engine|tools|technical_art|audio|design|build", prompt)
         self.assertIn("- technical_art: technical art", prompt)
         self.assertNotIn("{", prompt.split("## Job")[1])
@@ -131,22 +131,24 @@ class Project(unittest.TestCase):
             time.sleep(0.2)
 
     def test_busy_run_is_queued_and_dispatched(self):
+        cfg = self.proj / "team.toml"
+        cfg.write_text(cfg.read_text().replace("max_parallel = 3", "max_parallel = 1"))
         self.team("new", "--no-run", "first")
         self.team("new", "--no-run", "already running")
         self.set_state("t002", status="running")
         with (self.proj / ".agent-team/t002/.lock-run").open("a") as run, \
-                (self.proj / ".agent-team/.lock-editor").open("a") as editor:
-            teamcfg.lock(run, blocking=False)  # stand in for the process advancing t002 with the default lock
-            teamcfg.lock(editor, blocking=False)
+                (self.proj / ".agent-team/.lock-slot0").open("a") as slot:
+            teamcfg.lock(run, blocking=False)  # stand in for the process advancing t002 in the only slot
+            teamcfg.lock(slot, blocking=False)
             r = self.team("new", "third")
-            self.assertIn("queued: resource 'editor' is busy", r.stdout)
+            self.assertIn("queued: 1 team runs are already in progress", r.stdout)
             self.assertEqual(self.state("t003")["status"], "new")
             self.set_state("t001", status="gate", reason="Senior Dev: confirm the API")
             self.team("approve", "t001", "go ahead")
             s = self.state("t001")
             self.assertEqual(s["status"], "new")
             self.assertIn("go ahead", s["notes"][-1])  # the approval survives queueing
-            self.assertEqual(self.team("queue", "--once").stdout, "")  # t002 holds the lock
+            self.assertEqual(self.team("queue", "--once").stdout, "")  # t002 holds the only slot
         self.set_state("t002", status="done")
         (self.proj / ".agent-team/queue.txt").write_text("# order\nt001: first (after t003)\n")
         self.assertIn("started t003", self.team("queue", "--once").stdout)  # t001 waits for t003
@@ -165,59 +167,113 @@ class Project(unittest.TestCase):
         self.team("run", "--queued", "t001")
         self.assertEqual((self.state("t001")["status"], self.state("t001")["n"]), ("failed", 0))
 
-    def test_queue_skips_probe_blocked_tasks(self):
+    def agent(self, tid, *a, ok=True):
+        """`team ...` as an agent stage of task tid runs it (TEAM_TASK set)."""
+        r = subprocess.run([sys.executable, "-I", str(ROOT / "team.py"), *a], cwd=self.proj,
+                           env=dict(self.env, TEAM_TASK=tid, TEAM_STAGE="02-implement-mid"),
+                           capture_output=True, text=True, timeout=60)
+        if ok:
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        return r
+
+    def running(self, *tids):
+        """Hold the run locks of tids, standing in for their team processes; returns the open files."""
+        files = []
+        for tid in tids:
+            f = (self.proj / f".agent-team/{tid}/.lock-run").open("a")
+            teamcfg.lock(f, blocking=False)
+            self.addCleanup(f.close)
+            files.append(f)
+        return files
+
+    def until_log(self, text):
+        log, deadline = self.proj / ".agent-team/live.log", time.time() + 30
+        while text not in (log.read_text() if log.exists() else ""):
+            self.assertLess(time.time(), deadline, f"live.log never showed {text!r}")
+            time.sleep(0.2)
+
+    def test_lock_is_held_only_while_leased(self):
+        for request in ("one", "two"):
+            self.team("new", "--no-run", request)
+        _, run2 = self.running("t001", "t002")
+        self.assertIn("locked editor", self.agent("t001", "lock", "editor").stdout)
+        self.assertIn("locked editor", self.agent("t001", "lock", "editor").stdout)  # again: still its own
+        self.assertIn("locks: editor (t001, 02-implement-mid, since", self.team("status").stdout)
+        r = self.agent("t002", "lock", "editor", ok=False)
+        self.assertEqual(r.returncode, 3)
+        self.assertIn("busy: editor (t001", r.stderr)
+        self.assertEqual(self.agent("t002", "unlock", "editor", ok=False).returncode, 3)  # not its lease
+        self.assertIn("locked build", self.agent("t002", "lock", "build").stdout)  # other resources run in parallel
+        waiter = subprocess.Popen([sys.executable, "-I", str(ROOT / "team.py"), "lock", "editor", "--wait", "30"],
+                                  cwd=self.proj, env=dict(self.env, TEAM_TASK="t002"), stdout=subprocess.PIPE,
+                                  stderr=subprocess.PIPE, text=True)
+        self.addCleanup(waiter.kill)
+        time.sleep(1)
+        self.assertIsNone(waiter.poll())  # waits while t001 holds it
+        self.assertIn("unlocked editor", self.agent("t001", "unlock", "editor").stdout)
+        out, err = waiter.communicate(timeout=15)
+        self.assertEqual((waiter.returncode, out), (0, "locked editor\n"), err)
+        run2.close()  # t002's run ends without unlocking: its leases are stale at once
+        self.assertIn("locked editor", self.agent("t001", "lock", "editor").stdout)
+        self.assertIn("unknown lock", self.agent("t001", "lock", "nope", ok=False).stderr)
+
+    def test_run_end_frees_the_tasks_leases(self):
+        self.team("new", "--no-run", "forgets to unlock")
+        st = self.proj / ".agent-team"
+        (st / "lease-editor.json").write_text(json.dumps({"task": "t001", "stage": "x", "owner": "agent", "since": 0}))
+        self.team("run", "t001")  # the fake Producer fails; the run ends either way
+        self.assertFalse((st / "lease-editor.json").exists())
+        self.assertIn("[t001] run ended: freed editor", (st / "live.log").read_text())
+
+    def test_lock_probe_refuses_unless_skip_if_holds(self):
         cfg = self.proj / "team.toml"
         cfg.write_text(cfg.read_text().replace("min_free_mib = 9000", "min_free_mib = 100")
                        .replace('probe_cmd = ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"]',
-                                'probe_cmd = ["echo", "10"]')
-                       .replace("max_parallel = 3", "max_parallel = 1"))
-        self.team("new", "--no-run", "--res", "gpu", "needs the gpu")
-        self.team("new", "--no-run", "plain")
-        for tid in ("t001", "t002"):
-            self.set_state(tid, queued=True)
-        self.assertIn("started t002", self.team("queue", "--once").stdout)  # t001 must not hold the only slot
-        self.until_status("t002", "failed")
-        self.assertEqual(self.state("t001")["status"], "new")
+                                'probe_cmd = ["echo", "10"]'))
+        self.team("new", "--no-run", "needs the gpu")
+        self.running("t001")
+        r = self.agent("t001", "lock", "gpu", ok=False)
+        self.assertEqual(r.returncode, 3)
+        self.assertIn("not enough free gpu (< 100 MiB)", r.stderr)
+        self.agent("t001", "lock", "editor")  # [locks.gpu] skip_if_holds = "editor"
+        self.assertIn("locked gpu", self.agent("t001", "lock", "gpu").stdout)
 
-    def test_hold_reserves_locks_until_release(self):
+    def test_hold_leases_to_the_user_until_release(self):
         st = self.proj / ".agent-team"
-        self.team("new", "--no-run", "needs the editor")
-        self.set_state("t001", queued=True)
+        for request in ("one", "two"):
+            self.team("new", "--no-run", request)
+        self.running("t001", "t002")
         self.assertIn("no active hold", self.team("release", ok=False).stderr)
+        self.agent("t001", "lock", "editor")
         holder = subprocess.Popen([sys.executable, "-I", str(ROOT / "team.py"), "hold", "--res", "editor"],
-                                  cwd=self.proj, env=self.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+                                  cwd=self.proj, env=self.env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         self.addCleanup(holder.kill)
-        deadline = time.time() + 30
-        while "held for the user" not in (st / "live.log").read_text() if (st / "live.log").exists() else True:
-            self.assertLess(time.time(), deadline, "hold never took the editor lock")
-            time.sleep(0.2)
-        with (st / ".lock-editor").open("a") as f:
-            self.assertRaises(BlockingIOError, teamcfg.lock, f, False)
-        self.assertEqual(self.team("queue", "--once").stdout, "")  # held: not started
+        self.until_log("hold: waiting for 'editor'")  # the agent keeps it until it unlocks
+        self.agent("t001", "unlock", "editor")
+        self.until_log("held for the user")
+        r = self.agent("t002", "lock", "editor", ok=False)
+        self.assertEqual(r.returncode, 3)
+        self.assertIn("the user (`team hold`)", r.stderr)
         self.assertIn("already active", self.team("hold", ok=False).stderr)
         self.assertIn("hold ends", self.team("release").stdout)
-        self.assertEqual(holder.wait(timeout=30), 0)
+        self.assertEqual(holder.wait(timeout=15), 0)
         self.assertIn("hold: released", (st / "live.log").read_text())
-        self.assertFalse((st / "hold.json").exists())
-        (st / "hold.json").write_text('{"locks": ["editor"]}')  # stale: its process is gone
-        self.assertIn("started t001", self.team("queue", "--once").stdout)
-        self.until_status("t001", "failed")
+        self.assertFalse((st / "hold.json").exists() or (st / "lease-editor.json").exists())
+        (st / "lease-editor.json").write_text(json.dumps({"task": "user", "owner": "user", "since": 0}))
+        self.assertIn("locked editor", self.agent("t002", "lock", "editor").stdout)  # stale: no hold process
 
-    def test_release_ends_a_hold_still_waiting_for_a_running_task(self):
-        st = self.proj / ".agent-team"
-        st.mkdir(exist_ok=True)
-        with (st / ".lock-editor").open("a") as busy:
-            teamcfg.lock(busy, blocking=False)  # stands in for a running task holding the editor
-            holder = subprocess.Popen([sys.executable, "-I", str(ROOT / "team.py"), "hold", "--res", "editor"],
-                                      cwd=self.proj, env=self.env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            self.addCleanup(holder.kill)
-            deadline = time.time() + 30
-            while "waiting for 'editor'" not in ((st / "live.log").read_text() if (st / "live.log").exists() else ""):
-                self.assertLess(time.time(), deadline, "hold never started waiting")
-                time.sleep(0.2)
-            self.assertIn("hold ends", self.team("release").stdout)
-            self.assertEqual(holder.wait(timeout=15), 0)  # ends while the task still runs
-        self.assertIn("hold: released", (st / "live.log").read_text())
+    def test_release_ends_a_hold_still_waiting_for_an_agent(self):
+        self.team("new", "--no-run", "busy")
+        self.running("t001")
+        self.agent("t001", "lock", "editor")
+        holder = subprocess.Popen([sys.executable, "-I", str(ROOT / "team.py"), "hold", "--res", "editor"],
+                                  cwd=self.proj, env=self.env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.addCleanup(holder.kill)
+        self.until_log("hold: waiting for 'editor'")
+        self.assertIn("hold ends", self.team("release").stdout)
+        self.assertEqual(holder.wait(timeout=15), 0)  # ends while the agent still holds it
+        self.assertIn("hold: released", (self.proj / ".agent-team/live.log").read_text())
+        self.assertIn("locked editor", self.agent("t001", "lock", "editor").stdout)  # t001 kept its lease
 
     def test_wait_reports_each_change_once(self):
         for request in ("broken", "finished"):

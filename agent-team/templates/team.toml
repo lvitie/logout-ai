@@ -28,15 +28,13 @@ mcp = "write"                 # Claude runs: user MCP servers load in "all" stag
 user_skills = false           # true: also load the user's own Claude skills/slash commands (--disable-slash-commands otherwise)
 codex_sandbox = "workspace-write"  # "user": Codex writers follow your ~/.codex/config.toml instead of -s workspace-write
 
-[locks]                       # resources a task may hold; same lock = exclusive, different locks run in parallel
-names = ["editor", "gpu", "build"]
-default = ["editor"]          # every task holds these (the editor/project is the serial resource). `team new --res
-                              # gpu|build|none` picks others: gpu = GPU-heavy captures or renders without the editor,
-                              # build = standalone compiles/cooks/packaging; none = read-only or tool-only work
-[locks.gpu]                   # free-resource check before running next to other jobs (skipped without nvidia-smi)
+[locks]                       # shared resources an agent leases only while using one (`team lock`/`team unlock`)
+names = ["editor", "gpu", "build"]  # editor = the project editor; gpu = GPU-heavy captures or renders; build = cooks/packaging
+default = ["editor"]          # kept for old configs: tasks no longer hold locks for their whole run
+[locks.gpu]                   # `team lock gpu` refuses while the probe reports too little (skipped without nvidia-smi)
 min_free_mib = 9000
 probe_cmd = ["nvidia-smi", "--query-gpu=memory.free", "--format=csv,noheader,nounits"]
-skip_if_holds = "editor"      # no check when this lock is held too
+skip_if_holds = "editor"      # no check while the task holds this lock too
 
 [queue]                       # refill: when the queue runs low the Producer proposes the next tasks from the plan
 refill = true                 # proposals become pNNN lines in queue_file; nothing runs until `team promote`

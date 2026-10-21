@@ -54,6 +54,7 @@ class FocusTests(unittest.TestCase):
         self.write("t004/state.json", '{"id": "t004", "status": "runn')  # corrupt
         (self.runs / "t005").mkdir()  # no state.json: not a task
         self.task("t006", status="new", title="queued work")
+        self.write("lease-editor.json", json.dumps({"task": "t001", "stage": "02-implement-mid", "owner": "agent"}))
         self.task("t007", status="done", title="finished today", finished=NOW - 900)
         self.task("t008", status="done", title="yesterday", finished=NOW - 86400)
 
@@ -80,7 +81,7 @@ class FocusTests(unittest.TestCase):
         self.assertIn("you       Approve the art style", text)
         self.assertNotIn("Write loader", text)
         self.assertIn("pending: work", text)
-        self.assertRegex(text, r"1\. t006 +queued work  editor busy \(t001\)")
+        self.assertRegex(text, r"1\. t006 +queued work  ready, not started")
         self.assertIn("finished today", text)
         self.assertNotIn("yesterday", text)
 

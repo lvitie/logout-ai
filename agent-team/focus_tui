@@ -200,7 +200,9 @@ def frame(now, width, height, pending=None, err=None, running_ids=None):
         elif st == "done" and pending and str(s["change"]) in pending:
             attention.append((s, "done", f"{team.noun()} {s['change']} pending: review (`team review {s['id']}`)"))
 
-    holders = {r: s["id"] for s in running for r in (s["res"] or team.CFG["locks"]["default"]) if r != "none"}
+    ids = {s["id"] for s in running}  # an agent's lease counts while its run lives, the user's while `team hold` does
+    holders = {n: cur["task"] if cur.get("owner") != "user" else "you" for n in team.CFG["locks"]["names"]
+               if (cur := team.read_lease(n)) and (cur.get("task") in ids if cur.get("owner") != "user" else team.hold_active())}
     by_id = {s["id"]: s for s in tasks}
     order = queue_order(runs / team.CFG["project"]["queue_file"])
     notes = dict(order)
@@ -208,8 +210,7 @@ def frame(now, width, height, pending=None, err=None, running_ids=None):
     new += [s for s in tasks if s["status"] == "new" and s not in new]
     for s in new:
         dep = re.search(r"\b(after [^)]*)", notes.get(s["id"], ""))
-        busy = [f"{r} busy ({holders[r]})" for r in (s["res"] or team.CFG["locks"]["default"]) if r in holders]
-        queue.append((s, dep[1] if dep else "slot cap" if len(running) >= cap else ", ".join(busy) or "ready, not started"))
+        queue.append((s, dep[1] if dep else "slot cap" if len(running) >= cap else "ready, not started"))
     queue += [({"id": k, "title": t.split(":", 1)[-1].strip()}, "planned")
               for k, t in order if k not in by_id and not re.fullmatch(r"t\d+", k)]
     today = datetime.fromtimestamp(now).date()
@@ -233,7 +234,7 @@ def frame(now, width, height, pending=None, err=None, running_ids=None):
         swap = f"{planned}→{role}" + (" ov" if role in ov.values() else "") if actual and actual != planned else role
         rounds = s["plan_rounds"] if kind.startswith("plan") else s["review_rounds"]
         rnd = f"r{rounds + 1}/{team.MAX_ROUNDS + 1}" if kind != "route" else ""
-        res = ",".join(s["res"])
+        res = ",".join(n for n, who in holders.items() if who == s["id"]) or "-"
         times = f"{dur(now - s['stage_started']) if s.get('stage_started') else '-'}/" \
                 f"{dur(now - s['created']) if s.get('created') else '-'}"
         starting = ("" if actual else f" {D}(starting){X}") + \

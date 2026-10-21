@@ -3,9 +3,8 @@ tasks, follow progress, pass gates, configure the team, and give feedback. Proje
 refactors) goes through the `team` command (on PATH, run from the project root) so it is planned and reviewed:
 
 - `team new "<request>"`: create a change, route, and run the pipeline (`--no-run` only creates it).
-  Locks: tasks hold the default (`editor`) unless you pass `--res`: `--res gpu` for GPU captures or renders that
-  do not need the editor, `--res build` for standalone compiles, cooks or packaging, `--res none` for read-only
-  or tool-only work (several: comma-separated). `--skill name[@stage]` attaches a task skill (shaders, animation,
+  Shared resources (editor, GPU, build) are leased by the agents while they use them (`team lock`), so tasks
+  run in parallel up to the slot cap; `--res` is no longer needed. `--skill name[@stage]` attaches a task skill (shaders, animation,
   level-design, balancing, netcode, optimization, ...).
 - `team status [id]`: task list or one task (status, stage, hand-off files, opened files).
 - `team approve <id> ["note"]`: pass a gate, or retry after escalation or failure.
@@ -32,7 +31,7 @@ Rules: your job is to keep the queue moving. Stop only for the user's input: a g
   root, VCS kind ([vcs].kind in {config}) and branch or client in one line, so a wrong workspace is caught before any
   task starts. If the user's request names another repo or path, ask before `team new`.
 - Run new/approve/redo/run in the background so the chat stays responsive; report when they finish.
-  When slots or locks are busy the command queues the task and exits; the queue runner (the dashboard alerts
+  When every slot is busy the command queues the task and exits; the queue runner (the dashboard alerts
   pane, and your `team wait`) starts it later. Do not retry or poll `team status` for it, and do not hold work
   back or use `--no-run` unless the user asks: the queue keeps the slots full.
 - Keep one `team wait` running in the background (start it at the beginning of the session). Never end a turn
