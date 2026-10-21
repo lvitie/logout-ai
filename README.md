@@ -314,6 +314,7 @@ team status [id]                 # all tasks, or one task in detail
 team approve <id> ["note"]       # pass a gate, or retry after a failure
 team redo <id> "feedback"        # send the work back with feedback
 team drop <id> ["note"]          # abandon a task
+team tidy                        # delete raw logs of finished tasks (done tasks are tidied already)
 team review [id ...]             # open the HTML review page
 team queue                       # start queued tasks without the dashboard
 team wait                        # wait for the next task that needs attention

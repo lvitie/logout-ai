@@ -1,5 +1,5 @@
 """Token/cost/time report for agent-team runs (`team tokens`): reads <state_dir>/tNNN/logs/*.jsonl, the stage
-files and state.json. Handles Claude (`result` event; falls back to the last usage of each assistant message when
+files and state.json (whose `runs` keep the rows of logs that `team tidy` deleted). Handles Claude (`result` event; falls back to the last usage of each assistant message when
 a run was cut off) and Codex (`turn.completed`, summed; cost n/a). Log lines that are not JSON are skipped."""
 import json
 import re
@@ -70,19 +70,37 @@ def run_stats(path):
     return r
 
 
+def log_runs(td):
+    """run_stats + stem and prompt_chars of each stage log in task folder td, JSON-ready (what tidy keeps)."""
+    rows = []
+    for f in sorted((td / "logs").glob("*.jsonl")):
+        if STAGE.match(f.name):
+            row = run_stats(f)
+            p = f.with_name(f.name[:-6] + ".prompt.md")
+            row.update(stem=f.stem, tools=dict(row["tools"]), prompt_chars=p.stat().st_size if p.exists() else 0)
+            rows.append(row)
+    return rows
+
+
 def collect(state_dir, ids=None):
-    """[dict] one row per stage run: task, n, kind, agent + run_stats + prompt_chars."""
+    """[dict] one row per stage run: task, n, kind, agent + run_stats + prompt_chars; a stage whose log was tidied
+    away comes from state.json `runs`."""
     rows = []
     for td in sorted(Path(state_dir).glob("t[0-9]*")):
         if ids and td.name not in ids:
             continue
-        for f in sorted((td / "logs").glob("*.jsonl")):
-            m = STAGE.match(f.name)
+        got = {r["stem"]: r for r in log_runs(td)}
+        try:
+            kept = json.loads((td / "state.json").read_text()).get("runs") or []
+        except (OSError, ValueError, AttributeError):
+            kept = []
+        for r in kept:
+            got.setdefault(r.get("stem", ""), dict(r))
+        for stem, row in sorted(got.items(), key=lambda kv: int(kv[0].split("-", 1)[0]) if kv[0][:1].isdigit() else 0):
+            m = STAGE.match(stem + ".jsonl")
             if not m:
                 continue
-            row = run_stats(f)
-            p = f.with_name(f.name[:-6] + ".prompt.md")
-            row.update(task=td.name, n=int(m[1]), kind=m[2], agent=m[3], prompt_chars=p.stat().st_size if p.exists() else 0)
+            row.update(task=td.name, n=int(m[1]), kind=m[2], agent=m[3], tools=Counter(row.get("tools") or {}))
             rows.append(row)
     return rows
 

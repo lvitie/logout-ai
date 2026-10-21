@@ -103,10 +103,41 @@ class EndToEnd(unittest.TestCase):
                                            "review_rounds": 0, "n": 5, "first_pass": True, "review_rounds_total": 1,
                                            "escalations": None, "history": 5})
         self.assertIsNotNone(s["first_finish"])
+        self.assertNotIn("learn", " ".join(x["stem"] for x in s["launches"]))  # nothing went wrong: no learn stage
+        self.assertEqual(list((self.proj / ".agent-team/t001/logs").glob("*.jsonl")), [])  # tidied at done
+        self.assertEqual(len(s["runs"]), 5)
         out = self.team("status")
         self.assertIn("t001  done", out)
         self.assertIn("end", out)
-        self.team("tokens", "t001")
+        self.assertIn("5 ", self.team("tokens", "t001"))
+
+    def test_learnings_reach_the_next_task(self):
+        self.script(ROUTE, DONE, PASS, DONE, MINOR, FIXED, PASS, "Notes.\n- Run the linter before the review.\n")
+        self.team("new", "picky")
+        self.assertEqual(self.call(8)[0][self.call(8)[0].index("--tools") + 1], "Read,Glob,Grep")
+        self.assertIn("## How it went", self.call(8)[1])
+        learned = (self.proj / ".agent-team/learnings.md").read_text()
+        self.assertEqual(learned, "- Run the linter before the review.\n")
+        self.script(ROUTE, "STATUS: GATE stop\n")
+        self.team("new", "next")
+        self.assertIn("## Learnings from earlier tasks\n- Run the linter before the review.", self.call(9)[1])
+        self.assertIn("Run the linter", self.call(10)[1])
+        self.script("UNCHANGED\n")
+        self.team("drop", "t002")
+        self.assertEqual(self.state("t002")["status"], "dropped")  # drop tidies, it does not learn
+        self.assertEqual(list((self.proj / ".agent-team/t002/logs").glob("*.jsonl")), [])
+        self.assertEqual((self.proj / ".agent-team/learnings.md").read_text(), learned)
+
+    def test_tidy_command(self):
+        self.script(*HAPPY)
+        self.team("new", "old task")
+        logs = self.proj / ".agent-team/t001/logs"
+        (logs / "05-review-qa.jsonl").write_text('{"type": "result", "usage": {"input_tokens": 9}}\n')  # from before tidy
+        (logs / "05-review-qa.prompt.md").write_text("x" * 100)
+        self.assertIn("tidied 1 tasks", self.team("tidy"))
+        self.assertEqual(sorted(p.name for p in logs.iterdir()), [])
+        row = next(r for r in self.state()["runs"] if r["stem"] == "05-review-qa")
+        self.assertEqual((row["fresh"], row["prompt_chars"]), (9, 100))
 
     def test_gate_then_approve_from_another_process(self):
         self.script(ROUTE, "Which one?\nSTATUS: GATE pick A or B\n")
@@ -116,7 +147,8 @@ class EndToEnd(unittest.TestCase):
         self.script(DONE, PASS, DONE, PASS)
         self.team("approve", "t001", "use A")
         s = self.state()
-        self.assertEqual((s["status"], s["n"]), ("done", 6))
+        self.assertEqual((s["status"], s["n"]), ("done", 7))  # 7: the learn stage (a note), unscripted: it fails
+        self.assertEqual(s["launches"][-1]["stem"], "07-learn-producer")  # and the task stays done
         self.assertIn("Approved (gameplay: pick A or B): use A", s["notes"])
 
     def test_minor_rounds_escalate_then_approve_retries_implement(self):
@@ -128,7 +160,7 @@ class EndToEnd(unittest.TestCase):
         self.script(DONE, PASS)
         self.team("approve", "t001")
         s = self.state()
-        self.assertEqual((s["status"], s["review_rounds"], s["n"], s["impl_fails"]), ("done", 0, 11, 3))
+        self.assertEqual((s["status"], s["review_rounds"], s["n"], s["impl_fails"]), ("done", 0, 12, 3))  # 12: learn
         self.assertNotIn("minor_rounds", s)
 
     def test_redo_done_task_and_drop_gated_task(self):
@@ -137,7 +169,7 @@ class EndToEnd(unittest.TestCase):
         self.script(DONE, PASS)
         self.team("redo", "t001", "also do B")
         s = self.state()
-        self.assertEqual((s["status"], s["n"]), ("done", 7))
+        self.assertEqual((s["status"], s["n"]), ("done", 8))  # 8: learn after the redo note
         self.assertIn("also do B", s["notes"])
         self.script(ROUTE, "STATUS: GATE stop here\n")
         self.team("new", "second")
@@ -186,7 +218,7 @@ class EndToEnd(unittest.TestCase):
         self.script(ROUTE, DONE, PASS, DONE, MINOR, FIXED, PASS)  # 4 implement, 5 review, 6 retry, 7 re-review
         self.team("new", "picky once")
         s = self.state()
-        self.assertEqual((s["status"], s["n"]), ("done", 7))
+        self.assertEqual((s["status"], s["n"]), ("done", 8))  # 8: learn
         impl, rev = self.session(4), self.session(5)
         self.assertEqual([impl[0], rev[0]], ["--session-id", "--session-id"])
         self.assertEqual(self.session(6), ("--resume", impl[1]))
@@ -201,7 +233,7 @@ class EndToEnd(unittest.TestCase):
         self.assertIn("Fixed the nit.", rereview)  # the new report; its own findings are already in its context
         self.assertNotIn("## Earlier findings", rereview)
         self.assertIn("## Request", self.call(4)[1])
-        self.assertEqual([x["resumed"] for x in s["launches"][3:]], [False, False, True, True])
+        self.assertEqual([x["resumed"] for x in s["launches"][3:7]], [False, False, True, True])
         self.assertNotIn("sessions", s)  # done: a redo starts new sessions
 
     def test_gate_resumes_unless_the_model_changed(self):

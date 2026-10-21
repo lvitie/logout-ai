@@ -61,7 +61,8 @@ team status --metrics             # per-route tokens, wall time, first-pass rate
 team tokens [ids] [--runs]        # tokens, cost, time per stage kind, agent and task
 team approve <id> ["note"]        # pass a gate or retry after escalation/failure
 team redo <id> "feedback"         # send back to the implementer (or Producer)
-team drop <id> ["note"]
+team drop <id> ["note"]           # abandon a task (its raw logs are tidied)
+team tidy [ids]                   # delete raw logs and prompt copies of done/dropped tasks; token rows stay
 team review [id ...]              # build and open the HTML review page (default: the latest done tasks)
 team queue [--once]               # start queued tasks as capacity frees up (the alerts pane does this)
 team hold [--res a,b] [--hours N] # lease [locks] to your own session (editor, GPU); agents' `team lock` waits
@@ -237,7 +238,8 @@ skip criteria from data: a route with a low first-pass rate or frequent upgrades
 | Path | Purpose |
 | --- | --- |
 | `agent-team/team.py` | orchestrator (pipeline, role selection, locks, task state) |
-| `agent-team/tokens.py` | `team tokens`: tokens, cost and time per stage kind, agent and task from the stage logs |
+| `agent-team/tokens.py` | `team tokens`: tokens, cost and time per stage kind, agent and task from the stage logs (or `state.json` `runs` once tidied) |
+| `agent-team/winexec.py` | WSL: Windows programs for sandboxed Codex agents through a file spool (`[agents] windows_exec`) |
 | `agent-team/teamcfg.py` | `team.toml` loader, XDG/agent-home helpers, template lookup |
 | `agent-team/windows_dashboard.py` | native Windows Terminal layout and project-bound console panes |
 | `agent-team/vcs.py`, `vcs_p4.py` | VCS adapter interface, git adapter, Perforce adapter |
@@ -435,10 +437,21 @@ each task waits, and today's finished tasks. A task counts as running only while
 ## State and runtime inputs
 
 Per project, under `state_dir`: `live.log`, `tNNN/` task folders (`state.json`, `.lock-run` held while it runs, hand-offs, `logs/`, `opened.txt`,
-`changes.diff`, `user_opened.txt`, `packet/`), `.lock-*`, `lease-<name>.json`, `.wait-seen.json`, `refill/` (refill runs and the proposal log), `guard-bin/`, `team.kdl`, `review/`. Optional inputs you
+`changes.diff`, `user_opened.txt`, `packet/`), `.lock-*`, `lease-<name>.json`, `learnings.md`, `.wait-seen.json`, `refill/` (refill runs and the proposal log), `guard-bin/`, `team.kdl`, `review/`. Optional inputs you
 create by hand: `queue.txt` (`tNNN: title` lines; their order and `(after tNNN)` notes drive the queue), `decisions.md` (shown by `review_page`), `role_override.json`
 (`{"t012": {"review": "director", "implement": "senior", "after_failed_reviews": 1}}`) and the `burst_file`
 (epoch deadline).
+
+End of a task. When a task reaches done, two quick steps run before the run ends:
+- Learnings: if anything went wrong (a failed first review or plan, an escalation, a route upgrade or a user note), one
+  cheap read-only Producer call (`jobs/learn.md`, no skills or heuristic) folds the lesson into
+  `<state_dir>/learnings.md`: at most 20 bullets of at most 25 words, merged and pruned, or `UNCHANGED`. The file is
+  not committed. Every stage prompt but refill carries it as `## Learnings from earlier tasks`; edit or delete it by
+  hand at any time. A failing learn call never changes the task.
+- Tidy: the token rows of the task's stage logs go into `state.json` `runs` (so `team tokens`, `--metrics` and the
+  review page keep working), then `logs/*.jsonl` and `logs/*.prompt.md` are deleted (about 85% of the state size) and
+  the agent sessions are cleared. Hand-offs, `changes.diff` and `state.json` stay. `team drop` tidies too;
+  `team tidy` does it for older tasks.
 
 Per Codex account, shared by every project using the same `$CODEX_HOME`:
 `${XDG_STATE_HOME:-~/.local/state}/agent-team/codex/<sha1(realpath $CODEX_HOME)[:12]>/` holds `usage_hist.jsonl`,

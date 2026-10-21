@@ -28,6 +28,7 @@ import winexec  # noqa: E402
 
 CLIP = 6000  # max chars of any hand-off inlined into a prompt
 RESUME_KINDS = ("plan", "plan_review", "implement", "plan_implement", "review")  # [agents] resume: rounds continue a session
+LEARN_MAX = 20  # bullets kept in learnings.md
 RESUME_LINE = "Next round of the same task; only what changed since your last turn follows."
 _usage = {"t": 0.0, "ok_t": 0.0, "fail": True, "low": False, "mode": "mixed"}  # ok_t: last good fetch
 H, P_MAX_X, WASTE, HIST_KEEP_S = 168.0, 2.5, 20.0, 72 * 3600
@@ -345,7 +346,7 @@ def agent_skills_table(agent, task_skills=()):
 
 def stage_skills(s, kind):
     """[(name, text)] of the task skills attached to this task for stage `kind` (ValueError when one cannot load)."""
-    if kind in ("route", "refill"):
+    if kind in ("route", "refill", "learn"):
         return []
     out = {}
     for k in s.get("skills", []):
@@ -385,6 +386,76 @@ def diff_summary(path, limit=40):
     return "\n".join(rows + ([f"- ... {len(files) - limit} more"] if len(files) > limit else []))
 
 
+def learnings_file():
+    return RUNS / "learnings.md"
+
+
+def learnings_note(kind):
+    """## Learnings from earlier tasks (<state_dir>/learnings.md) for every stage but refill."""
+    try:
+        text = learnings_file().read_text().strip() if kind != "refill" else ""
+    except OSError:
+        text = ""
+    return f"## Learnings from earlier tasks\n{text}" if text else ""
+
+
+def rounds_line(s):
+    return (f"plan rounds {s['plan_rounds']}, failed implementations {s.get('impl_fails', 0)}, review verdicts "
+            f"{s.get('review_rounds_total', 0)}, first review passed: {s.get('first_pass', 'n/a')}, escalations "
+            f"{s.get('escalations', 0)}, route upgrades {s.get('upgrades', 0)}, user notes {len(s['notes'])}")
+
+
+def eventful(s):
+    """Whether a finished task taught anything: a failed first review or plan, an escalation, an upgrade or a note."""
+    return (s.get("first_pass") is False or s["plan_rounds"] or s.get("impl_fails") or s.get("escalations")
+            or s.get("upgrades") or s["notes"])
+
+
+def learn(s):
+    """At done: a cheap read-only Producer call folds what this task taught into learnings.md (at most 20 short
+    bullets), under a lock so parallel tasks do not lose each other's updates. Never changes the task's outcome."""
+    if not eventful(s):
+        return
+    status, reason = s["status"], s["reason"]
+    with (RUNS / ".lock-learnings").open("a") as f:
+        teamcfg.lock(f)
+        try:
+            out, text, _, _ = run_agent(s, "learn", "producer")
+        except Exception as e:  # noqa: BLE001 - a learning is never worth a failed task
+            out, text = None, None
+            live(f"[{s['id']}] learn failed: {e}")
+        if out:
+            bullets = [" ".join(ln.strip().split()[:26]) for ln in body(text).splitlines() if ln.strip().startswith("- ")]
+            if bullets and not body(text).strip().startswith("UNCHANGED"):
+                _atomic_write(learnings_file(), "\n".join(bullets[:LEARN_MAX]) + "\n")
+                live(f"[{s['id']}] learnings: {len(bullets[:LEARN_MAX])} items")
+        elif s["status"] != status:
+            live(f"[{s['id']}] learn stage gave nothing ({s['reason']}); learnings unchanged")
+    s["status"], s["reason"] = status, reason
+
+
+def tidy(s):
+    """Fold the task's raw agent logs into state.json `runs` (token rows for `team tokens`) and delete them with the
+    prompt copies. The stage hand-offs, changes.diff and state stay: the review page and `team redo` need them."""
+    d = task_dir(s["id"])
+    for k, v in task_times(s).items():  # tasks from before the time fields date themselves by their prompt files
+        if k not in s and v is not None:
+            s[k] = v
+    runs = {r["stem"]: r for r in s.get("runs", [])}  # a redone task keeps the rows of its earlier rounds
+    runs.update({r["stem"]: r for r in tokens.log_runs(d)})
+    if runs:
+        s["runs"] = sorted(runs.values(), key=lambda r: int(r["stem"].split("-", 1)[0]))
+    freed = 0
+    for f in [*(d / "logs").glob("*.jsonl"), *(d / "logs").glob("*.prompt.md")]:
+        try:
+            freed += f.stat().st_size
+            f.unlink()
+        except OSError:
+            pass
+    s.pop("sessions", None)
+    return freed
+
+
 def windows_exec():
     """The [agents] windows_exec programs, when they apply (on WSL); else []."""
     return CFG["agents"]["windows_exec"] if winexec.is_wsl() else []
@@ -414,9 +485,10 @@ def prompt_parts(s, kind, agent, skills=()):
     d = task_dir(s["id"])
     probes = env_status()
     parts = [("role", role_text(agent)),
-             ("skills", agent_skills_table(agent, skills) if kind not in ("route", "refill") else ""),
+             ("skills", agent_skills_table(agent, skills) if kind not in ("route", "refill", "learn") else ""),
              ("common", fmt(teamcfg.template(CFG, "roles/common.md"))),
              ("vcs", fmt(teamcfg.template(CFG, f"vcs/{CFG['vcs']['kind']}.md"))),
+             ("learnings", learnings_note(kind)),
              ("locks", lock_note() if is_impl(kind) else ""),
              ("windows", winexec_note() if is_impl(kind) else ""),
              ("task", f"Task {s['id']} | {noun()} {s['change']} | folder {d} | {s.get('route')}/{s.get('domain')}"
@@ -437,6 +509,8 @@ def prompt_parts(s, kind, agent, skills=()):
         parts.append(("diagnose", "## Diagnosis required\nA reviewer rated the last failure critical or recommended "
                       "escalation. Before changing anything, state the root cause and why the earlier attempt missed it, "
                       "then fix that."))
+    if kind == "learn":
+        parts.append(("rounds", "## How it went\n" + rounds_line(s)))
     if not is_impl(kind) and CFG["prompts"]["readonly_note"]:
         parts.append(("readonly", CFG["prompts"]["readonly_note"]))
     if s["notes"]:
@@ -765,9 +839,11 @@ def apex_guard(s, ctx, role, burst):
 def ladder(s, kind):
     """The task's heuristic snapshot ({tiers, rules}), taken from the config at its first decision so that a later
     config edit cannot change a task in flight. None: no table (and the refill pseudo-task never uses one)."""
-    if kind != "refill" and "heuristic" not in s and CFG["heuristic"]:
+    if kind in ("refill", "learn"):  # learn: one cheap read-only call at the end, on its own profile
+        return None
+    if "heuristic" not in s and CFG["heuristic"]:
         s["heuristic"] = json.loads(json.dumps(CFG["heuristic"]))
-    return s.get("heuristic") if kind != "refill" else None
+    return s.get("heuristic")
 
 
 def run_agent(s, kind, agent, profile=None):
@@ -1014,7 +1090,7 @@ def _run_agent_once(s, kind, agent, role, burst, ctx=None):
         save(s)
     out, raw = d / f"{stem}.md", d / "logs" / f"{stem}.jsonl"
     raw.parent.mkdir(exist_ok=True)
-    if kind not in ("route", "refill"):
+    if kind not in ("route", "refill", "learn"):
         write_snapshot(s)
     parts = prompt_parts(s, kind, agent, skills)
     text = resume_prompt(parts, prev["seen"]) if resume else "\n\n".join(t for _, t in parts)
@@ -1504,7 +1580,8 @@ def advance(s, from_queue=False):
                                                          else f"Review the {noun()} (`team review {s['id']}`).")
                     s["finished"] = time.time()
                     s.setdefault("first_finish", s["finished"])  # `finished` moves on a redo; this one does not
-                    s.pop("sessions", None)  # a redo starts new sessions
+                    learn(s)
+                    tidy(s)  # also clears the sessions: a redo starts new ones
                 else:
                     step(s, stages)
             if s["status"] == "running" and s["stage"] != previous_stage and stage_label(s) != "end":
@@ -2205,9 +2282,28 @@ def cmd_drop(a):
     s["notes"].append("Dropped by the user" + (f": {a.note}" if a.note else ""))
     s["status"], s["reason"] = "dropped", a.note or "dropped"
     s["finished"] = time.time()
-    s.pop("sessions", None)
+    tidy(s)
     save(s)
     print(f"{a.id} dropped.")
+
+
+def cmd_tidy(a):
+    """Tidy done and dropped tasks that are not running (default: all): raw logs out, token rows kept."""
+    total = n = 0
+    for s in all_tasks():
+        if s["status"] not in ("done", "dropped") or (a.ids and s["id"] not in a.ids):
+            continue
+        f = run_lock(s["id"])
+        if not f:
+            continue
+        try:
+            s = load(s["id"])
+            freed = tidy(s)
+            save(s)
+        finally:
+            f.close()
+        total, n = total + freed, n + 1
+    print(f"tidied {n} tasks, freed {total / 1e6:.1f} MB")
 
 
 def cmd_redo(a):
@@ -2451,6 +2547,9 @@ def main():
     p = sub.add_parser("burst", help="spend Claude for a while: Codex roles move to Claude, the apex guard is lifted")
     p.add_argument("hours", type=float, help="duration in hours (0 ends an active burst)")
     p.set_defaults(func=cmd_burst)
+    p = sub.add_parser("tidy", help="delete the raw logs and prompt copies of done and dropped tasks (token rows stay)")
+    p.add_argument("ids", nargs="*", help="task ids (default: all done and dropped)")
+    p.set_defaults(func=cmd_tidy)
     p = sub.add_parser("tokens", help="tokens, cost and time per stage kind, agent and task (from the stage logs)")
     p.add_argument("ids", nargs="*", help="task ids (default: all)")
     p.add_argument("--runs", action="store_true", help="also list every stage run")
