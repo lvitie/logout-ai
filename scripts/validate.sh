@@ -81,7 +81,6 @@ required_files=(
   "agent-team/team.py"
   "agent-team/vcs.py"
   "agent-team/vcs_p4.py"
-  "agent-team/winexec.py"
   "agent-team/bin/team"
   "agent-team/bin/team-up"
   "agent-team/bin/vcs-guard"

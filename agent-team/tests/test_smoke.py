@@ -624,14 +624,21 @@ class Project(unittest.TestCase):
         self.team("new", "--no-run", "--role", "mid", "side task")
         self.team("run", "t001", ok=False)
         args = argv_file.read_text().splitlines()
-        self.assertEqual(args[args.index("-s") + 1], "workspace-write")
+        self.assertEqual(args[args.index("-s") + 1], "danger-full-access")  # no sandbox, Codex auto-review approves
+        self.assertIn('approvals_reviewer="auto_review"', args)
+        self.assertIn('approval_policy="on-request"', args)
         self.assertIn("--skip-git-repo-check", args)  # Perforce workspaces are not git repos
         cfg = (self.proj / "team.toml").read_text()
-        self.assertIn('codex_sandbox = "workspace-write"', cfg)
-        (self.proj / "team.toml").write_text(cfg.replace('codex_sandbox = "workspace-write"', 'codex_sandbox = "user"'))
+        self.assertIn('codex_sandbox = "danger-full-access"', cfg)
+        (self.proj / "team.toml").write_text(cfg.replace('codex_sandbox = "danger-full-access"', 'codex_sandbox = "workspace-write"'))
+        self.team("run", "t001", ok=False)
+        args = argv_file.read_text().splitlines()
+        self.assertEqual(args[args.index("-s") + 1], "workspace-write")
+        self.assertFalse(any("approval" in a for a in args))
+        (self.proj / "team.toml").write_text(cfg.replace('codex_sandbox = "danger-full-access"', 'codex_sandbox = "user"'))
         self.team("run", "t001", ok=False)
         self.assertNotIn("-s", argv_file.read_text().splitlines())  # the writer follows the user's Codex config
-        (self.proj / "team.toml").write_text(cfg.replace('codex_sandbox = "workspace-write"', 'codex_sandbox = "User"'))
+        (self.proj / "team.toml").write_text(cfg.replace('codex_sandbox = "danger-full-access"', 'codex_sandbox = "User"'))
         with self.assertRaisesRegex(ValueError, "codex_sandbox must be one of"):
             teamcfg.load(self.proj / "team.toml")
 

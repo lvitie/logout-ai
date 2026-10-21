@@ -32,15 +32,16 @@ RISKS, SIZES = ("low", "medium", "high"), ("small", "medium", "large")
 HEURISTIC_STAGES = ("route",) + STAGE_KINDS
 USAGE_STATES = ("low", "claude", "codex", "mixed")  # [[heuristic.rule]] when.usage
 MCP_MODES = ("none", "write", "all")
-CODEX_SANDBOXES = ("workspace-write", "user")  # [agents] codex_sandbox: user = writers follow ~/.codex/config.toml  # Claude runs: which stages load the user's MCP servers
+CODEX_SANDBOXES = ("danger-full-access", "workspace-write", "user")  # [agents] codex_sandbox for writers: no sandbox
+# with Codex auto-review approvals, the workspace-write sandbox, or the user's ~/.codex/config.toml  # Claude runs: which stages load the user's MCP servers
 CANONICAL_ROLES = ("producer", "mid", "senior", "architect", "director")
 DEFAULTS = {
     "project": {"name": "project", "root": ".", "state_dir": ".agent-team", "templates_dir": "", "team_setup": "",
                 "docs": ["AGENTS.md", "SPEC.md", "ROADMAP.md", "TASKS.md", "docs/"],
                 "queue_file": "queue.txt", "planning_file": "TASKS.md"},
     "vcs": {"kind": "git", "guard_names": ["git"], "deny": {}, "deny_flags": {}},
-    "agents": {"deny_extra": [], "mcp": "write", "user_skills": False, "codex_sandbox": "workspace-write",
-               "resume": True, "windows_exec": []},
+    "agents": {"deny_extra": [], "mcp": "write", "user_skills": False, "codex_sandbox": "danger-full-access",
+               "resume": True},
     "locks": {"names": [], "default": []},
     "routing": {"max_rounds": 2, "max_parallel": 3, "long_stage_min": 120, "domains": ["code"], "review_extra_domains": [],
                 "extra_review_role": "", "extra_review_routes": [], "domain_roles": {}, "domain": {},
@@ -123,9 +124,6 @@ def load(path=None):
     cfg["roles"] = roles
     if cfg["agents"]["mcp"] not in MCP_MODES:
         raise ValueError(f"team.toml [agents] mcp must be one of {', '.join(MCP_MODES)}")
-    we = cfg["agents"]["windows_exec"]
-    if not isinstance(we, list) or not all(isinstance(x, str) and x and "/" not in x and "\\" not in x for x in we):
-        raise ValueError("team.toml [agents] windows_exec must be a list of program file names (cmd.exe, p4.exe)")
     if not isinstance(cfg["agents"]["resume"], bool):
         raise ValueError("team.toml [agents] resume must be true or false")
     if cfg["agents"]["codex_sandbox"] not in CODEX_SANDBOXES:

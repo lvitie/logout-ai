@@ -239,7 +239,6 @@ skip criteria from data: a route with a low first-pass rate or frequent upgrades
 | --- | --- |
 | `agent-team/team.py` | orchestrator (pipeline, role selection, locks, task state) |
 | `agent-team/tokens.py` | `team tokens`: tokens, cost and time per stage kind, agent and task from the stage logs (or `state.json` `runs` once tidied) |
-| `agent-team/winexec.py` | WSL: Windows programs for sandboxed Codex agents through a file spool (`[agents] windows_exec`) |
 | `agent-team/teamcfg.py` | `team.toml` loader, XDG/agent-home helpers, template lookup |
 | `agent-team/windows_dashboard.py` | native Windows Terminal layout and project-bound console panes |
 | `agent-team/vcs.py`, `vcs_p4.py` | VCS adapter interface, git adapter, Perforce adapter |
@@ -270,8 +269,12 @@ profiles, the `# --- ladder` rows and, for `git`/`none`, the `[vcs]` block.
   `$CODEX_HOME/config.toml` and `<workspace>/.codex/config.toml`, plus `-c features.apps=false` (Codex has no strict flag
   and merges `-c mcp_servers={}` into the user's table instead of replacing it);
   `[agents].user_skills` (default false): load the user's own skills/slash commands. See `docs/TOKEN_EFFICIENCY.md`.
-  `[agents].codex_sandbox` (`workspace-write` default, `user`): `user` drops `-s workspace-write` for Codex writers so
-  they follow the user's own `$CODEX_HOME/config.toml` (needed for editors, containers, GPU); read-only stages stay `-s read-only`.
+  `[agents].codex_sandbox` (Codex writers): `danger-full-access` (default) runs them without a sandbox and with
+  `approval_policy="on-request"`, `approvals_reviewer="auto_review"`, so whatever Codex asks to approve goes to its
+  automatic reviewer instead of being skipped (like Claude's `--permission-mode auto`; editors, GPU and WSL interop
+  work, which the Linux sandbox blocks: on WSL it refuses the AF_VSOCK socket a `.exe` needs,
+  `UtilBindVsockAnyPort: socket failed 1`). `workspace-write` keeps writes inside the workspace and `.git` read-only;
+  `user` follows the user's own `$CODEX_HOME/config.toml`. Read-only stages always run `-s read-only`.
   `[agents].resume` (default true): the plan, plan_review, implement, plan_implement and review stages continue the
   CLI session their kind and agent last ran on (`state.json` `sessions`, Claude `--session-id`/`--resume`, Codex
   `exec resume`) while the cli and model stay the same; a step to another tier, a takeover or a usage swap starts
@@ -279,14 +282,6 @@ profiles, the `# --- ladder` rows and, for `git`/`none`, the `[vcs]` block.
   (new findings, report, notes, diagnosis), then the job. A resume the CLI refuses before any output is retried once
   fresh (`resume failed, fresh session` in `live.log`). Done and dropped tasks clear their sessions. Set false if
   resumed reviewers anchor on their earlier view.
-  `[agents].windows_exec` (default `[]`, WSL only): Windows programs Codex writers may run, as file names
-  (`["cmd.exe", "powershell.exe", "p4.exe"]`). WSL starts a `.exe` over an AF_VSOCK socket, which Codex's Linux sandbox
-  refuses (`UtilBindVsockAnyPort: socket failed 1`, even with network access), so these go through `winexec.py`: the
-  agent runs a listed program by bare name (a guard-bin shim) or `winexec <path> [args]`, the request lands in
-  `<task>/winexec/`, and the team process runs it outside the sandbox and streams stdout, stderr and the exit code
-  back (no stdin). Implement stages get the rule in their prompt. A listed program runs with the user's rights, so
-  list only what agents need (`cmd.exe` can do anything). Read-only Codex stages cannot use it, and Claude agents
-  (no sandbox) run the programs directly through the same shims.
 - `[locks]`: `names` are shared resources (editor, GPU, build) that an agent leases only while it uses one:
   implement stages get the rule and the exact commands, `team lock <name> [--wait S]` before starting it (exit 3
   while another task or `team hold` has it) and `team unlock <name>` as soon as it stops. A lease lives in
@@ -410,10 +405,11 @@ fixtures, so `./scripts/validate.sh` and the unit tests run inside an agent): `t
 the point a denial would fire, so aliases are covered). `push` is never exempt. Anything inside the root, a worktree
 sharing the root's repo, a failed probe, missing guard files (old installs, until the next `team.py` run) or a non-git `[vcs].kind`
 stays denied. The guard is a guardrail against accidental commits, not a security boundary: an agent can still
-run the real binary by absolute path. The hard limit for Codex writers is its `workspace-write` sandbox, which keeps
-`.git` read-only (network access follows `[sandbox_workspace_write]` in the Codex config, off by default, except for
-writers when the adapter sets `sandbox_network = True`, as p4 and custom adapters do by default: `p4 edit`/`add` must
-reach the server; git and none keep it off); Claude agents get the same subcommands as
+run the real binary by absolute path. With `[agents] codex_sandbox = "workspace-write"` the hard limit for Codex writers is
+that sandbox, which keeps `.git` read-only; its network access follows `[sandbox_workspace_write]` in the Codex
+config, off by default, except for writers when the adapter sets `sandbox_network = True`, as p4 and custom adapters
+do by default (`p4 edit`/`add` must reach the server; git and none keep it off). The default `danger-full-access`
+relies on this guard and Codex auto-review. Claude agents get the same subcommands as
 `Bash(...)` deny rules. Codex has no edit hook, so the files its `file_change` events report are opened (`prepare_edit`)
 or added in the task's change as they arrive; a file that cannot be opened (e.g. locked elsewhere) blocks the task
 with the file named, and deletions are left to the agent.
@@ -468,8 +464,9 @@ dump, set it as Claude Code's `statusLine` command.
 - The Codex coordinator chat runs with `-s danger-full-access`, like the unsandboxed Claude one: `team` starts agents
   that need network and write outside the project. Approval prompts follow the user's Codex config.
 - Claude runs with `--permission-mode auto`; read-only stages are limited to `Read,Glob,Grep`. Codex runs with
-  `-s read-only` for read-only stages and `-s workspace-write` for implementers, whatever `$CODEX_HOME/config.toml`
-  sets (unless `[agents] codex_sandbox = "user"`).
+  `-s read-only` for read-only stages and, for implementers, `-s danger-full-access` with Codex auto-review approvals
+  (`[agents] codex_sandbox`; `workspace-write` sandboxes them), whatever `$CODEX_HOME/config.toml` sets (unless
+  `codex_sandbox = "user"`).
 - `usage_tui` reads `$CODEX_HOME/sessions/**/*.jsonl` (only `rate_limits` lines), `$CLAUDE_CONFIG_DIR/projects/**/*.jsonl`
   (token counts) and spawns `codex app-server` for reset credits. It never reads `auth.json`.
 - Only with `[usage] claude_endpoint = true` does `usage_tui` read `$CLAUDE_CONFIG_DIR/.credentials.json` and

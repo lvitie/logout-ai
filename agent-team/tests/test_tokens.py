@@ -106,6 +106,12 @@ class Flags(unittest.TestCase):
 
     def test_session_flags(self):
         d = self.init()
+        base = (d / "team.toml").read_text()
+        full = team.agent_cmd("codex", "m", "low", False, "o", "T", True)  # default: no sandbox, auto-review approvals
+        self.assertEqual(full[-6:], ["-c", 'approvals_reviewer="auto_review"', "-c", 'sandbox_mode="danger-full-access"', "T", "-"])
+        (d / "team.toml").write_text(base + '\n[agents]\ncodex_sandbox = "workspace-write"\n')
+        team.CFG = None
+        team.init(d / "team.toml")
         self.assertEqual(team.agent_cmd("claude", "m", "low", True, "o", "S")[-2:], ["--session-id", "S"])
         self.assertEqual(team.agent_cmd("claude", "m", "low", True, "o", "S", True)[-2:], ["--resume", "S"])
         self.assertNotIn("--session-id", team.agent_cmd("claude", "m", "low", True, "o"))
@@ -118,7 +124,7 @@ class Flags(unittest.TestCase):
         self.assertNotIn("-s", res)
         self.assertEqual(res[-4:], ["-c", 'sandbox_mode="workspace-write"', "T", "-"])
         self.assertEqual(team.agent_cmd("codex", "m", "low", True, "o", "T", True)[-3:-2], ['sandbox_mode="read-only"'])
-        (d / "team.toml").write_text((d / "team.toml").read_text() + '\n[agents]\ncodex_sandbox = "user"\n')
+        (d / "team.toml").write_text(base + '\n[agents]\ncodex_sandbox = "user"\n')
         team.CFG = None
         team.init(d / "team.toml")
         res = team.agent_cmd("codex", "m", "low", False, "o", "T", True)
@@ -137,24 +143,6 @@ class Flags(unittest.TestCase):
             self.assertIn(part, text)
         for part in ("## Request", "R\n", "old"):
             self.assertNotIn(part, text)
-
-    def test_windows_exec_on_wsl(self):
-        d = self.init()
-        (d / "team.toml").write_text((d / "team.toml").read_text() + '\n[agents]\nwindows_exec = ["cmd.exe"]\n')
-        team.CFG = None
-        team.init(d / "team.toml")
-        s = team.load(team.create_task("diagnose")["id"])
-        self.assertNotIn("## Windows programs", team.build_prompt(s, "implement", "mid"))  # not WSL
-        with unittest.mock.patch.object(team.winexec, "is_wsl", return_value=True):
-            team.ensure_guards()
-            self.assertIn("winexec.py\" cmd.exe", (team._guard_dir() / "cmd.exe").read_text())
-            self.assertTrue((team._guard_dir() / "winexec").exists())
-            self.assertIn("## Windows programs", team.build_prompt(s, "implement", "mid"))
-            self.assertNotIn("## Windows programs", team.build_prompt(s, "review", "architect"))
-        (d / "team.toml").write_text((d / "team.toml").read_text().replace('"cmd.exe"', '"/mnt/c/x.exe"'))
-        team.CFG = None
-        with self.assertRaisesRegex(ValueError, "windows_exec must be a list of program file names"):
-            team.init(d / "team.toml")
 
     def test_slim_log_events(self):
         big = "x" * 30000
